@@ -504,6 +504,14 @@ static NSString *wq_folder_date_text(NSDate *date)
     BOOL _labels;
     BOOL _backupManager;
     BOOL _backupStorage;
+    BOOL _selectingBackups;
+    NSMutableSet<NSString *> *_selectedBackups;
+    UIBarButtonItem *_selectItem;
+    UIBarButtonItem *_menuItem;
+    UIBarButtonItem *_doneItem;
+    UIBarButtonItem *_deleteItem;
+    UIBarButtonItem *_allItem;
+    NSString *_baseTitle;
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
     BOOL _scanInFlight;
@@ -516,6 +524,8 @@ static NSString *wq_folder_date_text(NSDate *date)
     if ((self = [super initWithStyle:UITableViewStylePlain])) {
         _path = [path copy];
         self.title = title ?: (path.lastPathComponent.length ? path.lastPathComponent : @"/");
+        _baseTitle = self.title;
+        _selectedBackups = [NSMutableSet new];
         // Container parents: show bundle/group identifiers instead of UUIDs.
         NSString *parent = path.lastPathComponent;
         _labels = [@[@"Application", @"AppGroup", @"PluginKitPlugin", @"InternalDaemon", @"System"] containsObject:parent];
@@ -545,8 +555,16 @@ static NSString *wq_folder_date_text(NSDate *date)
     }
     [menuItems addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil
                           handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = path; }]];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
-                                                                               menu:[UIMenu menuWithChildren:menuItems]];
+    _menuItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
+                                                 menu:[UIMenu menuWithChildren:menuItems]];
+    if (_backupStorage) {
+        _selectItem = [[UIBarButtonItem alloc] initWithTitle:@"Select" style:UIBarButtonItemStylePlain
+                                                       target:self action:@selector(enterBackupSelection)];
+        _selectItem.enabled = NO;
+        self.navigationItem.rightBarButtonItems = @[_selectItem, _menuItem];
+    } else {
+        self.navigationItem.rightBarButtonItem = _menuItem;
+    }
     [self updateHeader];
     UISearchController *search = [[UISearchController alloc] initWithSearchResultsController:nil];
     search.searchResultsUpdater = self;
@@ -571,6 +589,7 @@ static NSString *wq_folder_date_text(NSDate *date)
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
+    if (_selectingBackups) [self exitBackupSelection];
     if (_scanInFlight) {
         _scanNeedsRefresh = YES;
         [_scanCancellation cancel];
@@ -656,6 +675,107 @@ static NSString *wq_folder_date_text(NSDate *date)
     }]];
 }
 
+#pragma mark Backup multi-selection
+
+- (NSArray<NSString *> *)backupUnitPathsInItems
+{
+    NSMutableArray<NSString *> *paths = [NSMutableArray new];
+    for (WQItem *item in _items)
+        if (wq_backup_unit_deletable(item.path)) [paths addObject:item.path];
+    return paths;
+}
+
+- (void)updateBackupSelectionAvailability
+{
+    _selectItem.enabled = !_selectingBackups && [self backupUnitPathsInItems].count > 0;
+}
+
+- (void)updateBackupSelectionBar
+{
+    _deleteItem.enabled = _selectedBackups.count > 0;
+    _allItem.enabled = _selectedBackups.count < [self backupUnitPathsInItems].count;
+}
+
+- (void)enterBackupSelection
+{
+    if ([self backupUnitPathsInItems].count == 0) {
+        wq_alert(self, @"Nothing to select", @"Only complete backup folders can be selected here.");
+        return;
+    }
+    _selectingBackups = YES;
+    [_selectedBackups removeAllObjects];
+    if (!_doneItem) {
+        _doneItem = [[UIBarButtonItem alloc] initWithTitle:@"Done" style:UIBarButtonItemStyleProminent
+                                                       target:self action:@selector(exitBackupSelection)];
+        _deleteItem = [[UIBarButtonItem alloc] initWithTitle:@"Delete" style:UIBarButtonItemStylePlain
+                                                       target:self action:@selector(deleteSelectedBackups)];
+        _deleteItem.tintColor = UIColor.systemRedColor;
+        _allItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle"]
+                                                     style:UIBarButtonItemStylePlain
+                                                    target:self action:@selector(selectAllBackups)];
+        _allItem.accessibilityLabel = @"Select All";
+    }
+    self.refreshControl.enabled = NO;
+    self.tableView.allowsMultipleSelection = YES;
+    self.title = @"Select Backups";
+    self.navigationItem.rightBarButtonItems = @[_allItem, _deleteItem, _doneItem];
+    [self updateBackupSelectionBar];
+    [self.tableView reloadData];
+}
+
+- (void)exitBackupSelection
+{
+    if (!_selectingBackups) return;
+    _selectingBackups = NO;
+    [_selectedBackups removeAllObjects];
+    self.tableView.allowsMultipleSelection = NO;
+    self.refreshControl.enabled = YES;
+    self.title = _baseTitle;
+    self.navigationItem.rightBarButtonItems = _backupStorage ? @[_selectItem, _menuItem] : nil;
+    if (!_backupStorage) self.navigationItem.rightBarButtonItem = _menuItem;
+    [self.tableView reloadData];
+    [self updateBackupSelectionAvailability];
+}
+
+- (void)selectAllBackups
+{
+    NSArray<NSString *> *paths = [self backupUnitPathsInItems];
+    [_selectedBackups addObjectsFromArray:paths];
+    [self updateBackupSelectionBar];
+    [self.tableView reloadData];
+}
+
+- (void)deleteSelectedBackups
+{
+    NSArray<NSString *> *paths = [_selectedBackups.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    if (paths.count == 0) return;
+    NSString *message = [NSString stringWithFormat:
+        @"This permanently removes %lu complete backup%@ and everything inside them. It cannot be undone.",
+        (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Delete backups?"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive
+                                              handler:^(UIAlertAction *__unused a) {
+        [self exitBackupSelection];
+        [self runIO:^BOOL(NSString **error) {
+            NSString *first = nil;
+            for (NSString *path in paths) {
+                NSString *failure = nil;
+                if (!wq_delete_backup(path, &failure) && first == nil)
+                    first = failure ?: @"Could not remove a backup.";
+            }
+            if (first) {
+                if (error) *error = [NSString stringWithFormat:@"%@ Some selected backups may still exist.", first];
+                return NO;
+            }
+            return YES;
+        } failure:@"Cannot delete backups"];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)reload
 {
     [_scanCancellation cancel];
@@ -712,6 +832,7 @@ static NSString *wq_folder_date_text(NSDate *date)
             return;
         }
         NSMutableArray<WQItem *> *items = [NSMutableArray new];
+        NSUInteger labelIssues = 0;
         NSArray *entries = names ?: childPaths;
         BOOL haveFullPaths = names == nil;
         for (NSString *entry in entries) {
@@ -737,6 +858,13 @@ static NSString *wq_folder_date_text(NSDate *date)
                 NSString *bid = token ? wq_container_label(item.path) : nil;
                 item.bundleID = bid;
                 item.label = token ? (wq_display_name(bid) ?: bid ?: @"(no label)") : @"NO TOKEN";
+                if (!token && labelIssues < 3) {
+                    wq_log(@"label: no token for %@", item.path);
+                    labelIssues++;
+                } else if (token && !bid.length && labelIssues < 3) {
+                    wq_log(@"label: no container identifier for %@", item.path);
+                    labelIssues++;
+                }
             }
             struct stat st;
             if (lstat(item.path.fileSystemRepresentation, &st) == 0) {
@@ -789,12 +917,15 @@ static NSString *wq_folder_date_text(NSDate *date)
             }
             self->_all = items;
             [self applyFilter];
-            self->_error = (names || childPaths != nil) ? nil : error;
+            self->_error = (names || childPaths != nil) ? nil
+                : (error.length ? error : @"Cannot list this folder. Container enumeration failed; see Log.");
             self->_scanStatus = nil;
             self->_lastReloadFinished = NSDate.date.timeIntervalSinceReferenceDate;
             [self.refreshControl endRefreshing];
             [self updateHeader];
             [self.tableView reloadData];
+            [self updateBackupSelectionAvailability];
+            if (self->_selectingBackups) [self updateBackupSelectionBar];
         });
     });
 }
@@ -833,12 +964,37 @@ static NSString *wq_folder_date_text(NSDate *date)
     c.image = appIcon ?: [UIImage systemImageNamed:item.isDir ? @"folder.fill" : (item.isLink ? @"link" : @"doc")];
     if (appIcon) c.imageProperties.maximumSize = CGSizeMake(36, 36);
     cell.contentConfiguration = c;
-    cell.accessoryType = item.isDir ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    if (_selectingBackups) {
+        BOOL selectable = wq_backup_unit_deletable(item.path);
+        cell.accessoryType = selectable && [_selectedBackups containsObject:item.path]
+            ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        cell.selectionStyle = selectable ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+    } else {
+        cell.accessoryType = item.isDir ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
     return cell;
+}
+
+- (NSIndexPath *)tableView:(UITableView *)tableView willSelectRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    if (_error || indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return nil;
+    if (!_selectingBackups) return indexPath;
+    WQItem *item = _items[(NSUInteger)indexPath.row];
+    return wq_backup_unit_deletable(item.path) ? indexPath : nil;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
+    if (_selectingBackups) {
+        if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return;
+        WQItem *selected = _items[(NSUInteger)indexPath.row];
+        if (!wq_backup_unit_deletable(selected.path)) return;
+        [_selectedBackups addObject:selected.path];
+        [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+        [self updateBackupSelectionBar];
+        return;
+    }
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (_error) return;
     if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return;
@@ -867,10 +1023,20 @@ static NSString *wq_folder_date_text(NSDate *date)
     [self.navigationController pushViewController:next animated:YES];
 }
 
+- (void)tableView:(UITableView *)tableView didDeselectRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    if (!_selectingBackups) return;
+    if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return;
+    WQItem *item = _items[(NSUInteger)indexPath.row];
+    [_selectedBackups removeObject:item.path];
+    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+    [self updateBackupSelectionBar];
+}
+
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
     contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point
 {
-    if (_error) return nil;
+    if (_selectingBackups || _error) return nil;
     if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return nil;
     WQItem *item = _items[(NSUInteger)indexPath.row];
     NSString *itemPath = [item.path copy];
@@ -936,19 +1102,14 @@ static NSString *wq_folder_date_text(NSDate *date)
                 if (latest) UIPasteboard.generalPasteboard.string = latest.bundleID ?: latest.label;
             }]];
         }
-        if (strongSelf->_backupManager && current.isDir) {
-            NSString *appRoot = wq_app_backup_root();
-            NSString *parent = current.path.stringByDeletingLastPathComponent;
-            NSString *grandparent = parent.stringByDeletingLastPathComponent;
-            if (appRoot.length && ([parent isEqualToString:appRoot] || [grandparent isEqualToString:appRoot])) {
-                UIAction *remove = [UIAction actionWithTitle:@"Delete Backup…" image:[UIImage systemImageNamed:@"trash"]
-                                                  identifier:nil handler:^(UIAction *__unused a) {
-                    WQItem *latest = currentItem();
-                    if (latest) [weakSelf confirmDeleteBackup:latest];
-                }];
-                remove.attributes = UIMenuElementAttributesDestructive;
-                [actions addObject:remove];
-            }
+        if (current.isDir && wq_backup_unit_deletable(current.path)) {
+            UIAction *remove = [UIAction actionWithTitle:@"Delete Backup…" image:[UIImage systemImageNamed:@"trash"]
+                                              identifier:nil handler:^(UIAction *__unused a) {
+                WQItem *latest = currentItem();
+                if (latest) [weakSelf confirmDeleteBackup:latest];
+            }];
+            remove.attributes = UIMenuElementAttributesDestructive;
+            [actions addObject:remove];
         }
         if (!strongSelf.readOnly && !strongSelf->_backupStorage) {
             [actions addObject:[UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"]
