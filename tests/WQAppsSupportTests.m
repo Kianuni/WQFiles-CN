@@ -87,6 +87,20 @@ static void TestNumericOrdering(void)
                                                 sameTime, 99, @"older") == NSOrderedDescending);
 }
 
+static void TestBundleIdentifiers(void)
+{
+    WQCheck(WQAppsSupportBundleIDValid(@"com.example.app"));
+    WQCheck(WQAppsSupportBundleIDValid(@"com.example-app_1"));
+    WQCheck(!WQAppsSupportBundleIDValid(@""));
+    WQCheck(!WQAppsSupportBundleIDValid(@"nodot"));
+    WQCheck(!WQAppsSupportBundleIDValid(@"com/example"));
+    WQCheck(!WQAppsSupportBundleIDValid(@"com..example"));
+    WQCheck(!WQAppsSupportBundleIDValid(@".com.example"));
+    WQCheck(!WQAppsSupportBundleIDValid(@"com.example."));
+    WQCheck(!WQAppsSupportBundleIDValid(@"com example.app"));
+    WQCheck(!WQAppsSupportBundleIDValid(@"../escape"));
+}
+
 static void TestJournalStates(void)
 {
     WQCheck(WQAppsSupportJournalStateForDictionary(@{ @"State": @"Active" }) == WQAppsSupportJournalActive);
@@ -146,6 +160,7 @@ int main(void)
     @autoreleasepool {
         TestManifestTypes();
         TestNumericOrdering();
+        TestBundleIdentifiers();
         TestJournalStates();
         TestTreeSignatures();
         if (failures) {

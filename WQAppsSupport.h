@@ -16,6 +16,19 @@ static inline BOOL WQAppsSupportIsBool(id value)
            CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
 }
 
+static inline BOOL WQAppsSupportBundleIDValid(NSString *bundleID)
+{
+    if (![bundleID isKindOfClass:NSString.class] || bundleID.length < 3 || bundleID.length > 255) return NO;
+    if ([bundleID hasPrefix:@"."] || [bundleID hasSuffix:@"."] || [bundleID containsString:@".."]) return NO;
+    static NSCharacterSet *bad;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        bad = [[NSCharacterSet characterSetWithCharactersInString:
+                @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"] invertedSet];
+    });
+    return [bundleID containsString:@"."] && [bundleID rangeOfCharacterFromSet:bad].location == NSNotFound;
+}
+
 static inline BOOL WQAppsSupportIsInteger(id value)
 {
     if (![value isKindOfClass:NSNumber.class]) return NO;

@@ -46,6 +46,7 @@ static NSArray<NSString *> *kAppBackupParts(void) { return @[@"Documents", @"Lib
 
 static NSString *wq_app_backup_root_for_bundle(NSString *bundleID)
 {
+    if (!WQAppsSupportBundleIDValid(bundleID)) return nil;
     return [wq_app_backup_root() stringByAppendingPathComponent:bundleID];
 }
 
@@ -69,6 +70,7 @@ static NSDictionary *wq_backup_manifest(NSString *backup)
 static BOOL wq_backup_root_child(NSString *path, NSString *bundleID)
 {
     NSString *root = [wq_app_backup_root_for_bundle(bundleID) stringByStandardizingPath];
+    if (!root.length) return NO;
     NSString *parent = [path.stringByDeletingLastPathComponent stringByStandardizingPath];
     NSString *name = path.lastPathComponent;
     return [parent isEqualToString:root] && name.length && ![name hasPrefix:@"."];
@@ -287,6 +289,10 @@ static BOOL wq_purge_and_verify(NSString *dir, unsigned long long *freed, NSStri
 static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev_t expectedDevice,
                                     ino_t expectedInode, NSString *reason, NSString **error)
 {
+    if (!WQAppsSupportBundleIDValid(bundleID)) {
+        if (error) *error = @"The app identifier is not a valid bundle identifier";
+        return nil;
+    }
     NSFileManager *fm = NSFileManager.defaultManager;
     if (!wq_validate_container(container, bundleID, expectedDevice, expectedInode, error)) return nil;
     NSString *root = wq_app_backup_root_for_bundle(bundleID);
@@ -463,8 +469,9 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
                 if (missingLabels <= 3) wq_log(@"app scan: no container identifier for %@", c);
             }
             struct stat identity;
-            BOOL hasIdentity = bid.length && wq_stat(c, &identity) && S_ISDIR(identity.st_mode);
-            if (!granted || !bid.length || !hasIdentity) limited++;
+            BOOL validBundle = WQAppsSupportBundleIDValid(bid);
+            BOOL hasIdentity = validBundle && wq_stat(c, &identity) && S_ISDIR(identity.st_mode);
+            if (!granted || !validBundle || !hasIdentity) limited++;
             WQAppItem *app = [WQAppItem new];
             app.container = c;
             app.bundleID = bid;
