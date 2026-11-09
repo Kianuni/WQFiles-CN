@@ -130,12 +130,17 @@ int main(void)
 {
     @autoreleasepool {
         NSString *path = TemporaryStorePath();
-        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"WQLaunchServicesStore"];
-        TestRetryAfterDiscoveryFailure(path);
-        TestRefreshAndUnicodeSafety(path);
-        TestOversizedStoreFailsClosed(path);
-        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"WQLaunchServicesStore"];
+        id oldPreference = [NSUserDefaults.standardUserDefaults objectForKey:@"WQLaunchServicesStore"];
+        @try {
+            [NSUserDefaults.standardUserDefaults removeObjectForKey:@"WQLaunchServicesStore"];
+            TestRetryAfterDiscoveryFailure(path);
+            TestRefreshAndUnicodeSafety(path);
+            TestOversizedStoreFailsClosed(path);
+        } @finally {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+            if (oldPreference) [NSUserDefaults.standardUserDefaults setObject:oldPreference forKey:@"WQLaunchServicesStore"];
+            else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"WQLaunchServicesStore"];
+        }
         if (failures) {
             fprintf(stderr, "%d LaunchServices regression check(s) failed\n", failures);
             return 1;
