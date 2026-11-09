@@ -27,6 +27,16 @@ static BOOL wq_looks_like_uuid(NSString *name)
     return name.length == 36 && [[NSUUID alloc] initWithUUIDString:name] != nil;
 }
 
+static BOOL wq_regular_file_for_ui(NSString *path)
+{
+    struct stat st;
+    if (!wq_stat(path, &st)) return NO;
+    if (S_ISREG(st.st_mode)) return YES;
+    if (!S_ISLNK(st.st_mode)) return NO;
+    if (stat(path.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode)) return YES;
+    return wq_grant(path) && stat(path.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 #pragma mark - Item
 
 @interface WQItem : NSObject
@@ -36,6 +46,7 @@ static BOOL wq_looks_like_uuid(NSString *name)
 @property (nonatomic, copy) NSString *bundleID;  // for the app icon
 @property (nonatomic) BOOL isDir;
 @property (nonatomic) BOOL isLink;
+@property (nonatomic) BOOL isRegular;
 @property (nonatomic) unsigned long long size;
 @property (nonatomic) mode_t mode;
 @property (nonatomic) uid_t uid;
@@ -138,9 +149,10 @@ static const NSUInteger kHexLimit = 64 * 1024;
         NSDictionary *__unused before = wq_file_version(path);
         NSData *data = wq_read(path, kViewLimit + 1, &error);
         NSDictionary *version = wq_file_version(path);
-        if (data && (!before || ![before isEqualToDictionary:version])) {
+        if (data && (!before || !version || ![before isEqualToDictionary:version])) {
             data = nil;
-            error = @"The file changed while it was being read. Open it again.";
+            error = version ? @"The file changed while it was being read. Open it again."
+                            : @"Could not establish a stable file version. Open it again.";
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_version = version;
@@ -294,6 +306,10 @@ static const NSUInteger kHexLimit = 64 * 1024;
         [self updateEditButton];
         return;
     }
+    if (!_version) {
+        wq_alert(self, @"Cannot save", @"The file has no verified version snapshot. Reopen it before saving.");
+        return;
+    }
     NSData *newData = nil;
     if (_kind == WQViewPlist) {
         NSData *xml = [_textView.text dataUsingEncoding:NSUTF8StringEncoding];
@@ -327,8 +343,10 @@ static const NSUInteger kHexLimit = 64 * 1024;
         NSString *path = self->_path;
         dispatch_async(wq_io(), ^{
             NSString *error = nil;
-            BOOL ok = wq_write_if_unchanged(path, newData, self->_version, &error);
-            NSDictionary *newVersion = ok ? wq_file_version(path) : nil;
+            BOOL wrote = wq_write_if_unchanged(path, newData, self->_version, &error);
+            NSDictionary *newVersion = wrote ? wq_file_version(path) : nil;
+            BOOL ok = wrote && newVersion != nil;
+            if (wrote && !newVersion) error = @"The file was written, but its new version could not be verified. Reopen it before saving again.";
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self->_editState finishSave:ok revision:savedRevision];
                 if (ok) self->_version = newVersion;
@@ -383,6 +401,7 @@ static NSUInteger wq_open_generation;
 
 static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readOnly, WQOpenMode mode)
 {
+    if (!nav || !path.length) return;
     // All calls originate on the main thread. A newer explicit or automatic
     // open invalidates older sniff requests, and leaving the originating screen
     // also prevents a late push.
@@ -406,6 +425,11 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
         }
         [nav pushViewController:vc animated:YES];
     };
+    if (!wq_regular_file_for_ui(path)) {
+        UIViewController *host = nav.topViewController;
+        if (host) wq_alert(host, @"Cannot open this item", @"Only regular files can be viewed.");
+        return;
+    }
     if (mode != WQOpenAuto) { push(mode); return; }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSData *head = wq_permission_hint(path, NO) ? nil : wq_read_range(path, 0, 4096, NULL);
@@ -428,6 +452,8 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     BOOL _labels;
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
+    BOOL _scanInFlight;
+    BOOL _scanNeedsRefresh;
 }
 
 - (instancetype)initWithPath:(NSString *)path title:(NSString *)title
@@ -476,13 +502,27 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    if (!_all && _scanCancellation.isCancelled) [self reload];
+    if (_scanNeedsRefresh) [self reload];
 }
 
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
-    [_scanCancellation cancel];
+    if (_scanInFlight) {
+        _scanNeedsRefresh = YES;
+        [_scanCancellation cancel];
+    }
+    _scanStatus = nil;
+    [self.refreshControl endRefreshing];
+    [self updateHeader];
+}
+
+- (void)viewDidDisappear:(BOOL)animated
+{
+    [super viewDidDisappear:animated];
+    if (!self.presentedViewController && self.navigationController.topViewController != self) {
+        wq_share_cancel(self);
+    }
 }
 
 // Device strip, then the full path in normal-size text that wraps at the
@@ -554,6 +594,11 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     WQScanCancellation *cancellation = [WQScanCancellation new];
     _scanCancellation = cancellation;
     NSUInteger generation = ++_scanGeneration;
+    _scanInFlight = YES;
+    _scanNeedsRefresh = NO;
+    _scanStatus = nil;
+    [self.refreshControl endRefreshing];
+    [self updateHeader];
     NSString *path = _path;
     BOOL labels = _labels;
     BOOL enumerable = [@[@"/private/var/mobile/Containers/Data/Application",
@@ -587,12 +632,32 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                 [self updateHeader];
             });
         }
-        if (cancellation.isCancelled) return;
+        if (cancellation.isCancelled) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (generation != self->_scanGeneration) return;
+                self->_scanInFlight = NO;
+                self->_scanNeedsRefresh = YES;
+                self->_scanStatus = nil;
+                [self.refreshControl endRefreshing];
+                [self updateHeader];
+            });
+            return;
+        }
         NSMutableArray<WQItem *> *items = [NSMutableArray new];
         NSArray *entries = names ?: childPaths;
         BOOL haveFullPaths = names == nil;
         for (NSString *entry in entries) {
-            if (cancellation.isCancelled) return;
+            if (cancellation.isCancelled) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (generation != self->_scanGeneration) return;
+                    self->_scanInFlight = NO;
+                    self->_scanNeedsRefresh = YES;
+                    self->_scanStatus = nil;
+                    [self.refreshControl endRefreshing];
+                    [self updateHeader];
+                });
+                return;
+            }
             WQItem *item = [WQItem new];
             item.name = haveFullPaths ? entry.lastPathComponent : entry;
             item.path = haveFullPaths ? entry : [path stringByAppendingPathComponent:entry];
@@ -609,9 +674,13 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             if (lstat(item.path.fileSystemRepresentation, &st) == 0) {
                 item.isLink = S_ISLNK(st.st_mode);
                 item.isDir = S_ISDIR(st.st_mode);
+                item.isRegular = S_ISREG(st.st_mode);
                 if (item.isLink) {
                     struct stat target;
-                    if (stat(item.path.fileSystemRepresentation, &target) == 0) item.isDir = S_ISDIR(target.st_mode);
+                    if (stat(item.path.fileSystemRepresentation, &target) == 0) {
+                        item.isDir = S_ISDIR(target.st_mode);
+                        item.isRegular = S_ISREG(target.st_mode);
+                    }
                 }
                 item.size = (unsigned long long)st.st_size;
                 item.mode = st.st_mode;
@@ -631,9 +700,8 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                 }
                 // File backups mirror the original path; label container UUIDs
                 // from the live container they came from.
-                NSRange r = [item.path rangeOfString:@"/private/var/mobile/Containers/"];
-                if (r.location != NSNotFound && r.location > 0 && wq_looks_like_uuid(name)) {
-                    NSString *live = [item.path substringFromIndex:r.location];
+                NSString *live = wq_backup_original_path(item.path);
+                if (live && wq_looks_like_uuid(name)) {
                     NSString *bid = wq_container_label(live);
                     if (bid) { item.bundleID = bid; item.label = wq_display_name(bid) ?: bid; }
                 }
@@ -649,11 +717,21 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             return [(a.label ?: a.name) localizedCaseInsensitiveCompare:(b.label ?: b.name)];
         }];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (generation != self->_scanGeneration || cancellation.isCancelled) return;
+            if (generation != self->_scanGeneration) return;
+            self->_scanInFlight = NO;
+            if (cancellation.isCancelled) {
+                self->_scanNeedsRefresh = YES;
+                self->_scanStatus = nil;
+                [self.refreshControl endRefreshing];
+                [self updateHeader];
+                return;
+            }
             self->_all = items;
             [self applyFilter];
-            self->_error = (names || childPaths.count) ? nil : error;
+            self->_error = (names || childPaths != nil) ? nil : error;
+            self->_scanStatus = nil;
             [self.refreshControl endRefreshing];
+            [self updateHeader];
             [self.tableView reloadData];
         });
     });
@@ -703,6 +781,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (_error) return;
+    if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return;
     WQItem *item = _items[(NSUInteger)indexPath.row];
     UIViewController *next;
     if (item.isDir) {
@@ -710,6 +789,10 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
         dir.readOnly = self.readOnly;
         next = dir;
     } else {
+        if (!item.isRegular) {
+            wq_alert(self, @"Cannot open this item", @"Only regular files can be viewed.");
+            return;
+        }
         wq_open_file(self.navigationController, item.path, self.readOnly, WQOpenAuto);
         return;
     }
@@ -720,61 +803,75 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point
 {
     if (_error) return nil;
+    if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return nil;
     WQItem *item = _items[(NSUInteger)indexPath.row];
+    NSString *itemPath = [item.path copy];
     __weak typeof(self) weakSelf = self;
+    WQItem *(^currentItem)(void) = ^WQItem *{
+        WQDirViewController *strongSelf = weakSelf;
+        if (!strongSelf || indexPath.section != 0 || (NSUInteger)indexPath.row >= strongSelf->_items.count) return nil;
+        WQItem *current = strongSelf->_items[(NSUInteger)indexPath.row];
+        return [current.path isEqualToString:itemPath] ? current : nil;
+    };
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
         actionProvider:^UIMenu *(NSArray<UIMenuElement *> *__unused suggested) {
+        WQItem *current = currentItem();
+        if (!current) return nil;
         NSMutableArray *actions = [NSMutableArray new];
-        if (item.isDir) {
+        if (current.isDir) {
             [actions addObject:[UIAction actionWithTitle:@"Share as ZIP (AirDrop…)" image:[UIImage systemImageNamed:@"square.and.arrow.up"]
                                               identifier:nil handler:^(UIAction *__unused a) {
+                WQItem *latest = currentItem();
                 UITableViewCell *cell = [weakSelf.tableView cellForRowAtIndexPath:indexPath];
-                if (weakSelf) wq_share_folder(weakSelf, item.path, nil, cell);
+                if (latest && weakSelf) wq_share_folder(weakSelf, latest.path, nil, cell);
             }]];
         }
-        if (!item.isDir) {
+        if (!current.isDir && current.isRegular) {
             [actions addObject:[UIAction actionWithTitle:@"Share" image:[UIImage systemImageNamed:@"square.and.arrow.up"]
                                               identifier:nil handler:^(UIAction *__unused a) {
+                WQItem *latest = currentItem();
                 UITableViewCell *cell = [weakSelf.tableView cellForRowAtIndexPath:indexPath];
-                if (weakSelf) wq_share(weakSelf, item.path, cell);
+                if (latest && weakSelf) wq_share(weakSelf, latest.path, cell);
             }]];
-            NSString *original = wq_backup_original_path(item.path);
+            NSString *original = wq_backup_original_path(current.path);
             if (original) {
                 [actions addObject:[UIAction actionWithTitle:@"Restore to Original Location"
                                                        image:[UIImage systemImageNamed:@"arrow.uturn.backward"]
                                                   identifier:nil handler:^(UIAction *__unused a) {
-                    [weakSelf restoreBackup:item.path to:original];
+                    WQItem *latest = currentItem();
+                    if (latest && weakSelf) [weakSelf restoreBackup:latest.path to:original];
                 }]];
             }
         }
-        if (!item.isDir) {
+        if (!current.isDir && current.isRegular) {
             BOOL ro = weakSelf.readOnly;
-            UINavigationController *nav = weakSelf.navigationController;
             [actions addObject:[UIMenu menuWithTitle:@"Open As" image:[UIImage systemImageNamed:@"arrow.up.forward.app"] identifier:nil
                                              options:0 children:@[
                 [UIAction actionWithTitle:@"Plist Editor" image:[UIImage systemImageNamed:@"list.bullet.indent"] identifier:nil
-                                  handler:^(UIAction *__unused a) { wq_open_file(nav, item.path, ro, WQOpenPlist); }],
+                                  handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenPlist); }],
                 [UIAction actionWithTitle:@"Text / Image" image:[UIImage systemImageNamed:@"doc.plaintext"] identifier:nil
-                                  handler:^(UIAction *__unused a) { wq_open_file(nav, item.path, ro, WQOpenText); }],
+                                  handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenText); }],
                 [UIAction actionWithTitle:@"Hex Viewer" image:[UIImage systemImageNamed:@"number"] identifier:nil
-                                  handler:^(UIAction *__unused a) { wq_open_file(nav, item.path, ro, WQOpenHex); }],
+                                  handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenHex); }],
             ]]];
         }
         [actions addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"]
                                           identifier:nil handler:^(UIAction *__unused a) {
-            UIPasteboard.generalPasteboard.string = item.path;
+            WQItem *latest = currentItem();
+            if (latest) UIPasteboard.generalPasteboard.string = latest.path;
         }]];
-        if (item.label) {
+        if (current.label) {
             [actions addObject:[UIAction actionWithTitle:@"Copy Identifier" image:[UIImage systemImageNamed:@"tag"]
                                               identifier:nil handler:^(UIAction *__unused a) {
-                UIPasteboard.generalPasteboard.string = item.label;
+                WQItem *latest = currentItem();
+                if (latest) UIPasteboard.generalPasteboard.string = latest.label;
             }]];
         }
         if (!weakSelf.readOnly) {
             [actions addObject:[UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"]
-                                              identifier:nil handler:^(UIAction *__unused a) { [weakSelf promptRename:item]; }]];
+                                              identifier:nil handler:^(UIAction *__unused a) { WQItem *latest = currentItem(); if (latest) [weakSelf promptRename:latest]; }]];
             UIAction *del = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"]
-                                           identifier:nil handler:^(UIAction *__unused a) { [weakSelf confirmDelete:item]; }];
+                                           identifier:nil handler:^(UIAction *__unused a) { WQItem *latest = currentItem(); if (latest) [weakSelf confirmDelete:latest]; }];
             del.attributes = UIMenuElementAttributesDestructive;
             [actions addObject:del];
         }
@@ -1267,7 +1364,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
         return;
     } else if (indexPath.row == 3) {
         [NSFileManager.defaultManager createDirectoryAtPath:wq_backup_root() withIntermediateDirectories:YES attributes:nil error:nil];
-        next = [[WQDirViewController alloc] initWithPath:wq_backup_root().stringByDeletingLastPathComponent title:@"Backups"];
+        next = [[WQDirViewController alloc] initWithPath:wq_backup_root() title:@"Backups"];
     } else {
         next = [WQLogViewController new];
     }
