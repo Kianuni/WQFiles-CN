@@ -95,7 +95,8 @@ unsigned long long wq_dir_size(NSString *dir);
 
 // Deletes every item *inside* dir (dir itself stays). No backup — for caches.
 // Adds freed bytes to *freed. A missing dir counts as done; NO if dir cannot
-// be read or listed, or if some items could not be removed.
+// be read or listed, ancestry contains links (except canonical /var), the target
+// changes, or some items could not be removed. Child links are not followed.
 BOOL wq_purge_contents(NSString *dir, unsigned long long *freed);
 
 // Copies every item inside srcDir into dstDir (replacing same-named items).
