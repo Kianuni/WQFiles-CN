@@ -116,6 +116,9 @@ typedef void *(*cq_result_fn)(void *);
 typedef void (*cq_free_fn)(void *);
 typedef char *(*cq_token_fn)(void *);
 typedef int64_t (*ext_consume_fn)(const char *);
+typedef void (*cq_iterate_fn)(void *, void (^)(void *));
+typedef const char *(*co_get_path_fn)(void *);
+typedef const char *(*co_get_id_fn)(void *);
 
 static void wq_release_handle(int64_t handle);
 
@@ -1710,6 +1713,61 @@ BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString **errorText)
     return allOk;
 }
 
+// Container-manager enumeration is a second, permission-independent way to
+// map a container path to its identifier. The enumeration pattern is the one
+// used by terminal_worse (GPL-3.0); no part-domain traversal is involved. The UUID xattr and the root-only
+// metadata plist are the fast paths; this query is the fallback for devices
+// or containers where either is unavailable. Paths and identifiers stay in a
+// short-lived cache because labels are requested for every row.
+static NSDictionary<NSString *, NSString *> *wq_container_identifier_map(void)
+{
+    static NSObject *lock;
+    static NSDictionary<NSString *, NSString *> *cached;
+    static NSTimeInterval cachedAt;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    @synchronized (lock) {
+        NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
+        if (cached && now - cachedAt < 60) return cached;
+
+        NSMutableDictionary<NSString *, NSString *> *map = [NSMutableDictionary new];
+        void *mgr = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL);
+        if (mgr) {
+            cq_create_fn create = (cq_create_fn)dlsym(mgr, "container_query_create");
+            cq_set_u64_fn setClass = (cq_set_u64_fn)dlsym(mgr, "container_query_set_class");
+            cq_iterate_fn iterate = (cq_iterate_fn)dlsym(mgr, "container_query_iterate_results_sync");
+            cq_free_fn freeQuery = (cq_free_fn)dlsym(mgr, "container_query_free");
+            co_get_path_fn getPath = (co_get_path_fn)dlsym(mgr, "container_object_get_path");
+            co_get_id_fn getIdentifier = (co_get_id_fn)dlsym(mgr, "container_object_get_identifier");
+            if (!getIdentifier) getIdentifier = (co_get_id_fn)dlsym(mgr, "container_result_get_identifier");
+            if (create && setClass && iterate && freeQuery && getPath) {
+                const uint64_t classes[] = { 0, 2, 5, 7, 8, 10, 11, 13 };
+                for (size_t i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
+                    void *query = create();
+                    if (!query) continue;
+                    setClass(query, classes[i]);
+                    iterate(query, ^(void *object) {
+                        if (!object) return;
+                        const char *path = getPath(object);
+                        const char *ident = getIdentifier ? getIdentifier(object) : NULL;
+                        if (!path || !path[0] || !ident || !ident[0]) return;
+                        NSString *p = [NSString stringWithUTF8String:path];
+                        NSString *v = [NSString stringWithUTF8String:ident];
+                        if (!p.length || !v.length) return;
+                        NSString *key = WQCanonicalVarPath(p);
+                        if (key.length && !map[key]) map[key] = v;
+                    });
+                    freeQuery(query);
+                }
+            }
+            dlclose(mgr);
+        }
+        cached = map;
+        cachedAt = now;
+        return cached;
+    }
+}
+
 NSString *wq_container_label(NSString *dir)
 {
     char buf[512];
@@ -1726,6 +1784,10 @@ NSString *wq_container_label(NSString *dir)
             return [NSString stringWithUTF8String:buf];
         }
     }
+    // Prefer the container-manager query over the metadata plist: it needs no
+    // file permission and can also label containers whose plist is root-only.
+    NSString *queried = wq_container_identifier_map()[WQCanonicalVarPath(dir)];
+    if (queried.length) return queried;
     // The metadata plist is usually root-only (mode 600); only try it when the
     // owner and mode let this app read it, so the Log isn't flooded.
     NSString *meta = [dir stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
