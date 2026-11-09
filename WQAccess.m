@@ -17,11 +17,28 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <string.h>
+#import <stdatomic.h>
 #import <sys/stat.h>
 #import <sys/mount.h>
 #import <sys/xattr.h>
 #import <unistd.h>
 #import <xpc/xpc.h>
+
+@implementation WQScanCancellation {
+    _Atomic BOOL _cancelled;
+}
+
+- (BOOL)isCancelled
+{
+    return atomic_load_explicit(&_cancelled, memory_order_relaxed);
+}
+
+- (void)cancel
+{
+    atomic_store_explicit(&_cancelled, YES, memory_order_relaxed);
+}
+
+@end
 
 #pragma mark - Log
 
@@ -747,9 +764,10 @@ static int64_t wq_volume_max_inode(fsid_t fsid)
     return (int64_t)st.st_ino + 100000;
 }
 
-NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode,
+NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancellation *cancellation,
                                   void (^progress)(int64_t, int64_t, NSUInteger))
 {
+    if (cancellation.isCancelled) return nil;
     NSString *base = wq_norm(dir);  // /private/var/... form
     struct statfs sfs;
     if (statfs(base.fileSystemRepresentation, &sfs) != 0 &&
@@ -776,11 +794,13 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode,
     size_t chunks = (size_t)((maxInode + chunk - 1) / chunk);
     __block int64_t done = 0;
     dispatch_apply(chunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
+        if (cancellation.isCancelled) return;
         int64_t first = (int64_t)c * chunk + 1, last = MIN(first + chunk - 1, maxInode);
         NSMutableArray *local = [NSMutableArray new];
         fsid_t id = fsid;
         char buf[1200];
         for (int64_t ino = first; ino <= last; ino++) {
+            if ((ino & 127) == 0 && cancellation.isCancelled) return;
             ssize_t n = fsgetpath(buf, sizeof(buf), &id, (uint64_t)ino);
             // fsgetpath returns /private/var/...; base is normalized the same way.
             if (n > 0 && strncmp(buf, prefix, prefixLen) == 0 && buf[prefixLen] == '/' &&
@@ -793,8 +813,12 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode,
         int64_t nowDone = done;
         NSUInteger count = found.count;
         [lock unlock];
-        if (progress) progress(nowDone, maxInode, count);
+        if (progress && !cancellation.isCancelled) progress(nowDone, maxInode, count);
     });
+    if (cancellation.isCancelled) {
+        wq_log(@"enumerate %@: cancelled after %lld object ids", dir, (long long)done);
+        return nil;
+    }
     [found sortUsingSelector:@selector(compare:)];
     wq_log(@"enumerate %@: found %lu direct child container(s)", dir, (unsigned long)found.count);
     return found;
@@ -923,7 +947,7 @@ static NSString *wq_find_ls_store(void)
     struct stat st;
     NSString *cached = [NSUserDefaults.standardUserDefaults stringForKey:kWQLSStoreKey];
     if (cached && wq_stat(cached, &st)) return cached;
-    NSArray *daemons = wq_enumerate(@"/private/var/mobile/Containers/Data/InternalDaemon", 0, nil);
+    NSArray *daemons = wq_enumerate(@"/private/var/mobile/Containers/Data/InternalDaemon", 0, nil, nil);
     for (NSString *c in daemons) {
         NSString *caches = [c stringByAppendingPathComponent:@"Library/Caches"];
         for (NSString *k in wq_list(caches, NULL)) {

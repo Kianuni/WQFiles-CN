@@ -70,12 +70,19 @@ BOOL wq_rename(NSString *path, NSString *newName, NSString *_Nullable *_Nullable
 // lstat with access retry. Returns NO if the item does not exist.
 BOOL wq_stat(NSString *path, struct stat *st);
 
+// Thread-safe cancellation for expensive filesystem scans.
+@interface WQScanCancellation : NSObject
+@property (atomic, readonly, getter=isCancelled) BOOL cancelled;
+- (void)cancel;
+@end
+
 // Discovers direct children of dir by brute-forcing inode numbers with
 // fsgetpath (not sandbox-gated), the way KAMUI/bad_query_list do. Needs no
 // token on dir. maxInode bounds the scan (0 = up to the newest id on the
 // volume); progress is called off the main thread, from several threads.
-// Returns absolute child paths, sorted.
+// Returns absolute child paths, sorted, or nil on failure/cancellation.
 NSArray<NSString *> *_Nullable wq_enumerate(NSString *dir, int64_t maxInode,
+                                            WQScanCancellation *_Nullable cancellation,
                                             void (^_Nullable progress)(int64_t done, int64_t total, NSUInteger found));
 
 // Total byte size of a directory tree (grants access as needed). 0 if missing.

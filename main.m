@@ -748,6 +748,8 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     CGFloat _headerWidth;
     NSString *_error;
     BOOL _labels;
+    WQScanCancellation *_scanCancellation;
+    NSUInteger _scanGeneration;
 }
 
 - (instancetype)initWithPath:(NSString *)path title:(NSString *)title
@@ -791,6 +793,18 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
     [self reload];
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    if (!_all && _scanCancellation.isCancelled) [self reload];
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+    [super viewWillDisappear:animated];
+    [_scanCancellation cancel];
 }
 
 // Device strip, then the full path in normal-size text that wraps at the
@@ -858,6 +872,10 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 
 - (void)reload
 {
+    [_scanCancellation cancel];
+    WQScanCancellation *cancellation = [WQScanCancellation new];
+    _scanCancellation = cancellation;
+    NSUInteger generation = ++_scanGeneration;
     NSString *path = _path;
     BOOL labels = _labels;
     BOOL enumerable = [@[@"/private/var/mobile/Containers/Data/Application",
@@ -871,24 +889,32 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
         NSArray *names = wq_list(path, &error);
         NSArray *childPaths = nil;
         // Parent gives no token on 27.x: discover children with fsgetpath.
-        if (!names && enumerable) {
+        if (!names && enumerable && !cancellation.isCancelled) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                 self->_scanStatus = @"Scanning inodes…";
                 [self updateHeader];
             });
-            childPaths = wq_enumerate(path, 0, ^(int64_t done, int64_t total, NSUInteger f) {
+            childPaths = wq_enumerate(path, 0, cancellation, ^(int64_t done, int64_t total, NSUInteger f) {
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                     self->_scanStatus = [NSString stringWithFormat:@"Scanning inodes… %lld%% · %lu found",
                                          (long long)(done * 100 / total), (unsigned long)f];
                     [self updateHeader];
                 });
             });
-            dispatch_async(dispatch_get_main_queue(), ^{ self->_scanStatus = nil; [self updateHeader]; });
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (generation != self->_scanGeneration || cancellation.isCancelled) return;
+                self->_scanStatus = nil;
+                [self updateHeader];
+            });
         }
+        if (cancellation.isCancelled) return;
         NSMutableArray<WQItem *> *items = [NSMutableArray new];
         NSArray *entries = names ?: childPaths;
         BOOL haveFullPaths = names == nil;
         for (NSString *entry in entries) {
+            if (cancellation.isCancelled) return;
             WQItem *item = [WQItem new];
             item.name = haveFullPaths ? entry.lastPathComponent : entry;
             item.path = haveFullPaths ? entry : [path stringByAppendingPathComponent:entry];
@@ -945,6 +971,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             return [(a.label ?: a.name) localizedCaseInsensitiveCompare:(b.label ?: b.name)];
         }];
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->_scanGeneration || cancellation.isCancelled) return;
             self->_all = items;
             [self applyFilter];
             self->_error = (names || childPaths.count) ? nil : error;
@@ -1479,6 +1506,8 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
     NSString *_status;   // scan / clean progress, nil when idle
     NSString *_result;   // last clean result
     BOOL _scanning, _cleaning;
+    WQScanCancellation *_scanCancellation;
+    NSUInteger _scanGeneration;
 }
 
 static NSString *const kCrashLogsPath =
@@ -1499,6 +1528,18 @@ static NSString *const kCrashLogsPath =
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
     [self scan];
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    if (_scanning && _scanCancellation.isCancelled) [self scan];
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+    [super viewWillDisappear:animated];
+    if (_scanning) [_scanCancellation cancel];
 }
 
 - (NSArray<WQCacheItem *> *)visibleItems
@@ -1555,6 +1596,10 @@ static NSString *const kCrashLogsPath =
 
 - (void)scan
 {
+    [_scanCancellation cancel];
+    WQScanCancellation *cancellation = [WQScanCancellation new];
+    _scanCancellation = cancellation;
+    NSUInteger generation = ++_scanGeneration;
     _scanning = YES;
     _result = nil;
     [self updateButtons];
@@ -1564,17 +1609,21 @@ static NSString *const kCrashLogsPath =
         NSArray *roots = @[@"/private/var/mobile/Containers/Data/Application",
                            @"/private/var/mobile/Containers/Data/PluginKitPlugin"];
         for (NSString *root in roots) {
+            if (cancellation.isCancelled) return;
             NSString *kind = [root.lastPathComponent isEqualToString:@"Application"] ? @"apps" : @"extensions";
-            NSArray *containers = wq_enumerate(root, 0, ^(int64_t done, int64_t total, NSUInteger f) {
+            NSArray *containers = wq_enumerate(root, 0, cancellation, ^(int64_t done, int64_t total, NSUInteger f) {
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                     [self setStatus:[NSString stringWithFormat:@"Finding %@… %lld%%", kind, (long long)(done * 100 / total)]];
                 });
             });
             NSUInteger idx = 0;
             for (NSString *c in containers) {
+                if (cancellation.isCancelled) return;
                 idx++;
                 if (idx % 10 == 0 || idx == containers.count) {
                     dispatch_async(dispatch_get_main_queue(), ^{
+                        if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                         [self setStatus:[NSString stringWithFormat:@"Measuring %@ %lu of %lu…", kind,
                                          (unsigned long)idx, (unsigned long)containers.count]];
                     });
@@ -1595,6 +1644,7 @@ static NSString *const kCrashLogsPath =
                 [items addObject:item];
             }
         }
+        if (cancellation.isCancelled) return;
         unsigned long long crash = wq_dir_size(kCrashLogsPath);
         if (crash > 0) {
             WQCacheItem *logs = [WQCacheItem new];
@@ -1608,6 +1658,7 @@ static NSString *const kCrashLogsPath =
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->_scanGeneration || cancellation.isCancelled) return;
             self->_items = items;
             self->_scanning = NO;
             self->_status = nil;
@@ -1803,6 +1854,9 @@ static NSString *const kCrashLogsPath =
     NSString *_query;
     NSString *_status;
     BOOL _busy;
+    WQScanCancellation *_scanCancellation;
+    NSUInteger _scanGeneration;
+    BOOL _scanning;
 }
 
 static NSArray<NSString *> *const kAppDataParts(void) { return @[@"Documents", @"Library", @"tmp"]; }
@@ -1934,6 +1988,18 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     [self scan];
 }
 
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    if (_scanning && _scanCancellation.isCancelled) [self scan];
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+    [super viewWillDisappear:animated];
+    if (_scanning) [_scanCancellation cancel];
+}
+
 - (void)setBusy:(BOOL)busy status:(NSString *)status
 {
     _busy = busy;
@@ -1943,12 +2009,18 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
 
 - (void)scan
 {
+    [_scanCancellation cancel];
+    WQScanCancellation *cancellation = [WQScanCancellation new];
+    _scanCancellation = cancellation;
+    NSUInteger generation = ++_scanGeneration;
+    _scanning = YES;
     [self setBusy:YES status:@"Finding apps…"];
     NSString *home = [NSHomeDirectory() stringByResolvingSymlinksInPath];
     dispatch_async(wq_io(), ^{
-        NSArray *containers = wq_enumerate(@"/private/var/mobile/Containers/Data/Application", 0,
+        NSArray *containers = wq_enumerate(@"/private/var/mobile/Containers/Data/Application", 0, cancellation,
             ^(int64_t done, int64_t total, NSUInteger f) {
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                     self->_status = [NSString stringWithFormat:@"Finding apps… %lld%%", (long long)(done * 100 / total)];
                     [self.tableView reloadData];
                 });
@@ -1956,9 +2028,11 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
         NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0;
         for (NSString *c in containers) {
+            if (cancellation.isCancelled) return;
             i++;
             if ([[c stringByResolvingSymlinksInPath] isEqualToString:home]) continue;  // ourselves
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                 self->_status = [NSString stringWithFormat:@"Measuring %lu/%lu…", (unsigned long)i, (unsigned long)containers.count];
                 [self.tableView reloadData];
             });
@@ -1982,6 +2056,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
             app.bytes = granted ? wq_dir_size(c) : 0;
             [apps addObject:app];
         }
+        if (cancellation.isCancelled) return;
         [apps sortUsingComparator:^NSComparisonResult(WQAppItem *a, WQAppItem *b) {
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
@@ -1994,6 +2069,8 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
         else if (limited) note = [NSString stringWithFormat:@"%lu containers · %lu with limited access or no identifier. See Log.",
                                   (unsigned long)apps.count, (unsigned long)limited];
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->_scanGeneration || cancellation.isCancelled) return;
+            self->_scanning = NO;
             self->_apps = apps;
             [self.refreshControl endRefreshing];
             [self setBusy:NO status:note];
