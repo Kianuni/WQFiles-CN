@@ -1607,6 +1607,99 @@ static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode)
     return foreign > 0;
 }
 
+static NSArray<NSString *> *(*gContainerListProvider)(NSString *storeHint);
+
+void wq_set_container_list_provider(NSArray<NSString *> *(*provider)(NSString *storeHint))
+{
+    gContainerListProvider = provider;
+}
+
+static BOOL wq_is_ls_store_name(const char *path)
+{
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    size_t len = strlen(name);
+    return len > 33 && strncmp(name, "com.apple.LaunchServices-", 25) == 0 && strcmp(name + len - 8, ".csstore") == 0;
+}
+
+// The LaunchServices database is rewritten on every app install or update, so
+// its id is among the newest: scan down from the top and stop at the first.
+static NSString *wq_scan_for_ls_store(fsid_t fsid, int64_t maxInode, qos_class_t qos, WQScanProgress progress)
+{
+    const int64_t chunk = 32768;
+    int64_t chunks = (maxInode + chunk - 1) / chunk;
+    __block int64_t nextChunk = 0, done = 0;
+    __block NSString *found = nil;
+    NSLock *lock = [NSLock new];
+    WQScanCancellation *stop = [WQScanCancellation new];
+    NSUInteger cores = NSProcessInfo.processInfo.activeProcessorCount;
+    size_t workers = (size_t)MAX((NSUInteger)1, MIN((NSUInteger)4, cores / 2));
+    dispatch_apply(workers, dispatch_get_global_queue(qos, 0), ^(size_t __unused w) {
+        fsid_t id = fsid;
+        char buf[1200];
+        NSUInteger none[8] = {0};
+        for (;;) {
+            if (stop.isCancelled) return;
+            [lock lock];
+            int64_t c = nextChunk++;
+            [lock unlock];
+            if (c >= chunks) return;
+            int64_t last = maxInode - c * chunk, first = MAX((int64_t)1, last - chunk + 1);
+            for (int64_t ino = last; ino >= first; ino--) {
+                if ((ino & 127) == 0 && stop.isCancelled) return;
+                if (fsgetpath(buf, sizeof(buf), &id, (uint64_t)ino) <= 0 || !wq_is_ls_store_name(buf)) continue;
+                [lock lock];
+                if (!found) found = [NSString stringWithUTF8String:buf];
+                [lock unlock];
+                [stop cancel];
+                return;
+            }
+            [lock lock];
+            done += last - first + 1;
+            int64_t nowDone = done;
+            [lock unlock];
+            if (progress && !stop.isCancelled) progress(nowDone, maxInode, none);
+        }
+    });
+    return found;
+}
+
+// iOS 26: the App Data and Extensions lists from the LaunchServices database.
+static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_store(NSArray<NSString *> *roots, fsid_t fsid,
+                                                                                   qos_class_t qos, WQScanProgress progress)
+{
+    if (!gContainerListProvider) return nil;
+    CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+    NSArray<NSString *> *paths = gContainerListProvider(nil);
+    NSString *how = @"remembered location";
+    if (paths.count < 2) {
+        int64_t probeInode = 0;
+        int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
+        if (maxInode <= 0) return nil;
+        NSString *store = wq_scan_for_ls_store(fsid, maxInode, qos, progress);
+        if (!store) {
+            wq_log(@"scan: no LaunchServices database found by id (%.1f s)", CFAbsoluteTimeGetCurrent() - started);
+            return nil;
+        }
+        paths = gContainerListProvider(store);
+        how = [NSString stringWithFormat:@"found by id in %.1f s", CFAbsoluteTimeGetCurrent() - started];
+        if (paths.count < 2) {
+            wq_log(@"scan: the LaunchServices database at %@ lists no containers", store);
+            return nil;
+        }
+    }
+    NSMutableDictionary<NSString *, NSMutableArray *> *byRoot = [NSMutableDictionary new];
+    for (NSString *root in roots) byRoot[root] = [NSMutableArray new];
+    for (NSString *path in paths) [byRoot[wq_norm(path).stringByDeletingLastPathComponent] addObject:wq_norm(path)];
+    if ([byRoot[roots[0]] count] < 2) return nil;
+    NSMutableDictionary *result = [NSMutableDictionary new];
+    for (NSString *root in roots) result[root] = [byRoot[root] sortedArrayUsingSelector:@selector(compare:)];
+    wq_log(@"scan: %lu apps, %lu extensions from the LaunchServices database (%@); daemon containers aren't listed there",
+           (unsigned long)[result[roots[0]] count], (unsigned long)[result[roots[1]] count], how);
+    return result;
+}
+
+
 static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_t fsid, qos_class_t qos)
 {
     NSArray<NSString *> *roots = wq_shared_scan_roots();
@@ -1625,6 +1718,17 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_
         NSMutableDictionary *merged = [lsListed mutableCopy];
         if (![merged[roots[2]] count]) merged[roots[2]] = @[];
         return merged;
+    }
+    if (!wq_system_areas_reachable()) {
+        // A full scan of a well-used iOS 26 device is 100+ million ids
+        // (about 40 minutes); the database lists the same containers.
+        WQScanProgress report = ^(int64_t done, int64_t total, const NSUInteger *__unused counts) {
+            void (^progress)(int64_t, int64_t, NSUInteger) = nil;
+            @synchronized (gSharedScanGuard) { progress = gScanProgress; }
+            if (progress) progress(done, total, 0);
+        };
+        NSDictionary *fromStore = wq_containers_from_ls_store(roots, fsid, qos, report);
+        if (fromStore) return fromStore;
     }
     int64_t probeInode = 0;
     int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);

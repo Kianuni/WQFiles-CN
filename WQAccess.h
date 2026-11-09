@@ -155,6 +155,10 @@ BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString *_Nullable *_
 NSString *_Nullable wq_container_label(NSString *dir);
 // Extra source for wq_container_label, tried after the identifier attribute and
 // the container-manager table: path (/private/var/...) -> identifier or nil.
+// iOS 26: where a full scan takes far too long, the App Data and Extensions
+// lists come from this provider (the LaunchServices database). storeHint is a
+// database path the scan found, or nil for the remembered one.
+void wq_set_container_list_provider(NSArray<NSString *> *_Nullable (*_Nullable provider)(NSString *_Nullable storeHint));
 void wq_set_container_label_resolver(NSString *_Nullable (*_Nullable resolver)(NSString *path));
 
 // Backups of overwritten or deleted files, mirrored by original path.

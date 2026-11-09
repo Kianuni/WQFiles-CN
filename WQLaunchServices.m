@@ -670,3 +670,25 @@ NSString *wq_display_name(NSString *bundleID)
         return nil;
     }
 }
+
+NSArray<NSString *> *wq_ls_container_paths(NSString *storeHint)
+{
+    // No lock and no scan here: the container scan calls this while a name
+    // load may be waiting for that scan.
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *path = storeHint.length ? storeHint : [defaults stringForKey:kWQLSStoreKey];
+    if (!path.length) return nil;
+    NSString *error = nil;
+    NSData *data = wq_read(path, kWQLSMaxStoreBytes + 1, &error);
+    if (!data || data.length > kWQLSMaxStoreBytes) {
+        wq_log(@"names: cannot read %@ (%@)", path, error ?: @"too large");
+        return nil;
+    }
+    NSDictionary *containers = nil;
+    if (!wq_parse_ls_store(data, NULL, NULL, &containers) || containers.count < 2) return nil;
+    if (storeHint.length) {
+        [defaults setObject:storeHint forKey:kWQLSStoreKey];
+        [defaults removeObjectForKey:kWQLSMissKey];
+    }
+    return containers.allKeys;
+}

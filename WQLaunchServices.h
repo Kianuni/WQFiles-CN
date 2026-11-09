@@ -23,5 +23,9 @@ void wq_load_display_names(void);
 // After a user's refresh: search for a database that wasn't found before
 // right away instead of waiting a day.
 void wq_display_names_reset_miss(void);
+// Every app and extension data container the LaunchServices database lists,
+// read from storeHint (remembered when it parses) or the remembered location.
+// Never scans. Nil when there's no usable database.
+NSArray<NSString *> *_Nullable wq_ls_container_paths(NSString *_Nullable storeHint);
 
 NS_ASSUME_NONNULL_END

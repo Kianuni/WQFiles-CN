@@ -482,7 +482,7 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
             wq_load_display_names();
         }
         if (!containers && !cancellation.isCancelled) wq_log(@"app scan: container enumeration failed; see the preceding enumerate log");
-        else if (containers.count == 0) wq_log(@"app scan: enumeration returned no container paths; check the base path and inode bound");
+        else if (containers && containers.count == 0) wq_log(@"app scan: enumeration returned no container paths; check the base path and inode bound");
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
         NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0, sizeLimited = 0;
         for (NSString *c in containers) {
