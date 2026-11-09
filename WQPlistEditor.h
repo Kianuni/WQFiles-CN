@@ -8,10 +8,11 @@
 //
 
 #import <UIKit/UIKit.h>
+#import "WQEditing.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface WQPlistEditorViewController : UITableViewController
+@interface WQPlistEditorViewController : UITableViewController <WQUnsavedEditing>
 // Loads `path` itself. openAsText / openAsHex (optional) switch to the other
 // viewers from the "Open As" menu.
 - (instancetype)initWithPath:(NSString *)path readOnly:(BOOL)readOnly;

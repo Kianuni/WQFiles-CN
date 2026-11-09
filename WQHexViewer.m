@@ -289,6 +289,11 @@ static NSData *wqh_parse_hex(NSString *text)
 
 #pragma mark Save, discard, leave
 
+- (BOOL)wq_needsLeaveConfirmation
+{
+    return _edits.count > 0 || _saving;
+}
+
 - (NSDictionary<NSNumber *, NSData *> *)runs
 {
     NSMutableDictionary *runs = [NSMutableDictionary new];

@@ -342,7 +342,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 
 typedef NS_ENUM(NSInteger, WQViewKind) { WQViewText, WQViewPlist, WQViewImage, WQViewHex };
 
-@interface WQFileViewController : UIViewController <UITextViewDelegate>
+@interface WQFileViewController : UIViewController <UITextViewDelegate, WQUnsavedEditing>
 @property (nonatomic) BOOL readOnly;
 - (instancetype)initWithPath:(NSString *)path;
 @end
@@ -533,6 +533,11 @@ static const NSUInteger kHexLimit = 64 * 1024;
     if (!_saving) return NO;
     wq_alert(self, @"Save in progress", @"Wait for the current save to finish before leaving or making more changes.");
     return YES;
+}
+
+- (BOOL)wq_needsLeaveConfirmation
+{
+    return _dirty || _saving;
 }
 
 - (void)confirmLeaveThen:(void (^)(void))proceed
@@ -2255,9 +2260,9 @@ static BOOL wq_replace_part(NSString *src, NSString *dst, NSString **error)
 
 #pragma mark - Navigation
 
-// Adds a Home button next to Back on screens two or more levels deep. Screens
-// with unsaved edits (plist editor, hex viewer) are asked first.
-@interface WQNavigationController : UINavigationController <UINavigationControllerDelegate>
+// Adds a Home button next to Back on screens two or more levels deep. Editors
+// guard Back, Home and the interactive edge swipe through WQUnsavedEditing.
+@interface WQNavigationController : UINavigationController <UINavigationControllerDelegate, UIGestureRecognizerDelegate>
 @end
 
 @implementation WQNavigationController
@@ -2266,6 +2271,7 @@ static BOOL wq_replace_part(NSString *src, NSString *dst, NSString **error)
 {
     [super viewDidLoad];
     self.delegate = self;
+    self.interactivePopGestureRecognizer.delegate = self;
 }
 
 - (void)navigationController:(UINavigationController *)nav willShowViewController:(UIViewController *)vc animated:(BOOL)animated
@@ -2284,17 +2290,24 @@ static BOOL wq_replace_part(NSString *src, NSString *dst, NSString **error)
     vc.navigationItem.leftBarButtonItem = home;
 }
 
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer
+{
+    if (gestureRecognizer != self.interactivePopGestureRecognizer) return YES;
+    if (self.viewControllers.count <= 1) return NO;
+    UIViewController<WQUnsavedEditing> *editor = (UIViewController<WQUnsavedEditing> *)self.topViewController;
+    if (![editor conformsToProtocol:@protocol(WQUnsavedEditing)] || !editor.wq_needsLeaveConfirmation) return YES;
+    __weak typeof(self) weakSelf = self;
+    [editor confirmLeaveThen:^{ [weakSelf popViewControllerAnimated:YES]; }];
+    return NO;
+}
+
 - (void)goHome
 {
-    UIViewController *top = self.topViewController;
-    SEL ask = NSSelectorFromString(@"confirmLeaveThen:");
+    UIViewController<WQUnsavedEditing> *top = (UIViewController<WQUnsavedEditing> *)self.topViewController;
     __weak typeof(self) weakSelf = self;
     void (^home)(void) = ^{ [weakSelf popToRootViewControllerAnimated:YES]; };
-    if ([top respondsToSelector:ask]) {
-        ((void (*)(id, SEL, void (^)(void)))[top methodForSelector:ask])(top, ask, home);
-        return;
-    }
-    home();
+    if ([top conformsToProtocol:@protocol(WQUnsavedEditing)]) [top confirmLeaveThen:home];
+    else home();
 }
 
 @end

@@ -269,6 +269,11 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 #pragma mark Leaving and saving
 
+- (BOOL)wq_needsLeaveConfirmation
+{
+    return self.doc.dirty || self.doc.saving;
+}
+
 - (void)leave
 {
     [self leaveThen:nil];

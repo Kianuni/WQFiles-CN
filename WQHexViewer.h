@@ -8,10 +8,11 @@
 //
 
 #import <UIKit/UIKit.h>
+#import "WQEditing.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface WQHexViewController : UITableViewController
+@interface WQHexViewController : UITableViewController <WQUnsavedEditing>
 - (instancetype)initWithPath:(NSString *)path readOnly:(BOOL)readOnly;
 @end
 
