@@ -96,6 +96,18 @@ int main(void)
                   @"streamed create removes a partial destination when the source changes");
             wq_test_stream_hook = nil;
 
+            NSString *savedBackupRoot = wq_test_backup_root;
+            NSString *blockedBackupRoot = [base stringByAppendingPathComponent:@"blocked-backups"];
+            put(blockedBackupRoot, @"not a directory");
+            wq_test_backup_root = blockedBackupRoot;
+            put(file, @"original");
+            NSDictionary *blockedVersion = wq_file_version(file);
+            error = nil;
+            check(!wq_write_if_unchanged(file, bytes(@"new"), blockedVersion, &error) && has(file, @"original"),
+                  @"backup I/O failure refuses the write");
+            check([error containsString:@"Backup of the current file failed"], @"backup I/O failure reports a specific reason");
+            wq_test_backup_root = savedBackupRoot;
+
             // Deterministic version change after descriptor verification, before backup.
             put(file, @"original");
             version = wq_file_version(file);

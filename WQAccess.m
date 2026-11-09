@@ -343,12 +343,14 @@ static BOOL wq_stream(int in, int out, NSString **errorText)
 
 // Always durable, including own files. Safety artifacts themselves are protected
 // from generic overwrite/delete: recursively backing up Backups is unbounded.
-static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath)
+static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath, NSString **errorText)
 {
+    if (errorText) *errorText = nil;
     NSString *original = WQCanonicalVarPath(path);
     NSString *root = WQCanonicalVarPath(wq_backup_root());
     if (!WQAbsolutePathGrammar(original) || wq_is_backup_storage_path(original)) {
         wq_log(@"backup: refusing invalid path or mutation of backup storage: %@", path);
+        if (errorText) *errorText = @"The path is invalid or belongs to backup storage.";
         return NO;
     }
     static NSDateFormatter *fmt;
@@ -366,10 +368,16 @@ static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath)
     NSString *stamp = counter == UINT64_MAX ? nil :
         [NSString stringWithFormat:@"%@-%llu", [fmt stringFromDate:NSDate.date], (unsigned long long)++counter];
     [lock unlock];
-    if (!stamp) return NO;
+    if (!stamp) {
+        if (errorText) *errorText = @"Cannot allocate a backup name.";
+        return NO;
+    }
     NSString *dest = [[root stringByAppendingPathComponent:stamp] stringByAppendingString:original];
     int parent = WQCreateDirectoriesNoLinks(dest.stringByDeletingLastPathComponent);
-    if (parent < 0) return NO;
+    if (parent < 0) {
+        if (errorText) *errorText = wq_errno(errno);
+        return NO;
+    }
     const char *name = dest.lastPathComponent.fileSystemRepresentation;
     NSString *error = nil;
     BOOL ok = NO;
@@ -399,6 +407,7 @@ static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath)
             if ((unsigned long long)sourceStat.st_size > available) {
                 error = @"Not enough free space for a full backup copy";
                 wq_log(@"backup: %@ (%@)", path, error);
+                if (errorText) *errorText = error;
                 close(parent);
                 return NO;
             }
@@ -418,6 +427,7 @@ static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath)
     close(parent);
     wq_log(@"backup: %@ -> %@", path, ok ? dest : error ?: @"FAILED");
     if (ok && backupPath) *backupPath = dest;
+    if (!ok && errorText) *errorText = error ?: @"Backup copy failed.";
     return ok;
 }
 
@@ -524,8 +534,10 @@ static BOOL wq_mutation_open(NSString *path, NSDictionary *expected, WQMutation 
 static BOOL wq_mutation_backup(NSString *path, WQMutation *mutation, NSString **backup, NSString **errorText)
 {
     if (!wq_mutation_current(path, mutation, YES, errorText)) return NO;
-    if (!wq_backup_fd(path, mutation->fd, backup)) {
-        if (errorText) *errorText = @"Backup of the current file failed, nothing was written (backup storage cannot be overwritten or deleted)";
+    NSString *backupError = nil;
+    if (!wq_backup_fd(path, mutation->fd, backup, &backupError)) {
+        if (errorText) *errorText = [NSString stringWithFormat:@"Backup of the current file failed, nothing was written: %@",
+                                     backupError ?: @"unknown error"];
         return NO;
     }
     WQ_MUTATION_HOOK(@"backedUp", path);
