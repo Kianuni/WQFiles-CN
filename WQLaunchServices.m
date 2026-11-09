@@ -142,7 +142,7 @@ static NSString *wq_cs_string(const uint8_t *b, size_t n, size_t o)
 {
     if (o > n || n - o < 8) return nil;
     uint32_t len = wq_rd32(b + o + 4);
-    if (len == 0 || len >= 0x800 || len > n - o - 8 || b[o + 8 + len] != 0) return nil;
+    if (len == 0 || len >= 0x800 || len >= n - o - 8 || b[o + 8 + len] != 0) return nil;
     if (memchr(b + o + 8, 0, len)) return nil;
     NSString *s = [[NSString alloc] initWithBytes:b + o + 8 length:len encoding:NSUTF8StringEncoding];
     return s;
