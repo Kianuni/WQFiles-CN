@@ -16,6 +16,7 @@
 #import "WQCore.h"
 #import "WQAccessSafety.h"
 #import <dlfcn.h>
+#import <objc/message.h>
 #import <dirent.h>
 #import <errno.h>
 #import <fcntl.h>
@@ -1447,6 +1448,70 @@ void wq_enumerate_invalidate(void)
 }
 
 
+// The first few path components, with UUIDs collapsed, so the Log shows which
+// areas are visible without listing individual files.
+static NSString *wq_sample_area(NSString *path)
+{
+    NSArray<NSString *> *parts = path.pathComponents;
+    NSMutableArray *kept = [NSMutableArray new];
+    for (NSString *part in parts) {
+        if (kept.count >= 7) break;
+        BOOL uuid = part.length == 36 && [[NSUUID alloc] initWithUUIDString:part] != nil;
+        [kept addObject:uuid ? @"*" : part];
+        if (uuid && kept.count >= 6) break;
+    }
+    return [NSString pathWithComponents:kept];
+}
+
+// LaunchServices API: each app's and plug-in's data container, where the
+// system lets this app ask (it refuses on iOS 27).
+static NSDictionary<NSString *, NSString *> *gLSAPILabels;
+
+static NSDictionary<NSString *, NSArray<NSString *> *> *wq_lsapi_list_containers(NSArray<NSString *> *roots, NSString **summary)
+{
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    SEL defaultSel = NSSelectorFromString(@"defaultWorkspace");
+    SEL appsSel = NSSelectorFromString(@"allInstalledApplications");
+    if (!workspaceClass || ![workspaceClass respondsToSelector:defaultSel]) { *summary = @"LaunchServices API: unavailable"; return nil; }
+    NSMutableDictionary<NSString *, NSString *> *labels = [NSMutableDictionary new];
+    NSUInteger proxies = 0, plugins = 0;
+    @try {
+        id (*send)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+        id workspace = send(workspaceClass, defaultSel);
+        if (![workspace respondsToSelector:appsSel]) { *summary = @"LaunchServices API: no application list"; return nil; }
+        NSArray *apps = send(workspace, appsSel);
+        SEL containerSel = NSSelectorFromString(@"dataContainerURL"), idSel = NSSelectorFromString(@"bundleIdentifier");
+        SEL pluginsSel = NSSelectorFromString(@"plugInKitPlugins");
+        void (^add)(id) = ^(id proxy) {
+            if (![proxy respondsToSelector:containerSel] || ![proxy respondsToSelector:idSel]) return;
+            NSURL *url = send(proxy, containerSel);
+            NSString *bid = send(proxy, idSel);
+            if (![url isKindOfClass:NSURL.class] || ![bid isKindOfClass:NSString.class] || !url.path.length || !bid.length) return;
+            NSString *path = wq_norm(url.path);
+            if (!labels[path]) labels[path] = bid;
+        };
+        for (id app in [apps isKindOfClass:NSArray.class] ? apps : @[]) {
+            proxies++;
+            add(app);
+            NSArray *appPlugins = [app respondsToSelector:pluginsSel] ? send(app, pluginsSel) : nil;
+            for (id plugin in [appPlugins isKindOfClass:NSArray.class] ? appPlugins : @[]) { plugins++; add(plugin); }
+        }
+    } @catch (NSException *exception) {
+        *summary = [NSString stringWithFormat:@"LaunchServices API: %@", exception.reason];
+        return nil;
+    }
+    NSMutableDictionary<NSString *, NSMutableArray *> *found = [NSMutableDictionary new];
+    for (NSString *root in roots) found[root] = [NSMutableArray new];
+    for (NSString *path in labels) [found[path.stringByDeletingLastPathComponent] addObject:path];
+    NSMutableDictionary *result = [NSMutableDictionary new];
+    for (NSString *root in roots) result[root] = [found[root] sortedArrayUsingSelector:@selector(compare:)];
+    *summary = [NSString stringWithFormat:@"LaunchServices API: %lu apps and %lu plug-ins, %lu data containers (%lu apps, %lu extensions)",
+                (unsigned long)proxies, (unsigned long)plugins, (unsigned long)labels.count,
+                (unsigned long)[result[roots[0]] count], (unsigned long)[result[roots[1]] count]];
+    @synchronized (NSNull.null) { gLSAPILabels = [labels copy]; }
+    return result;
+}
+
 // The container manager can list containers directly (instant, no scan). On
 // releases where it answers this app only with its own containers, the list
 // has no other apps and the fsgetpath scan is used instead. Classes are not
@@ -1510,6 +1575,7 @@ static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode)
     if (groupURL.path.length) [own addObject:wq_norm(groupURL.path)];
     int64_t stride = MAX((int64_t)1, maxInode / 20000);
     NSUInteger sampled = 0, resolved = 0, foreign = 0;
+    NSCountedSet<NSString *> *areas = [NSCountedSet new];
     char buf[1200];
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     for (int64_t ino = 1 + (int64_t)arc4random_uniform((uint32_t)MIN(stride, (int64_t)UINT32_MAX)); ino <= maxInode; ino += stride) {
@@ -1520,10 +1586,24 @@ static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode)
         NSString *path = [NSString stringWithUTF8String:buf];
         BOOL mine = NO;
         for (NSString *prefix in own) if ([path hasPrefix:prefix]) { mine = YES; break; }
-        if (!mine) foreign++;
+        if (!mine) {
+            foreign++;
+            [areas addObject:wq_sample_area(path)];
+        }
     }
-    wq_log(@"scan: fsgetpath sample: %lu of %lu ids resolve, %lu outside WQ Files (%.1f s)",
-           (unsigned long)resolved, (unsigned long)sampled, (unsigned long)foreign, CFAbsoluteTimeGetCurrent() - started);
+    wq_log(@"scan: fsgetpath sample: %lu of %lu ids resolve, %lu outside WQ Files (ids up to %lld, %.1f s)",
+           (unsigned long)resolved, (unsigned long)sampled, (unsigned long)foreign, (long long)maxInode,
+           CFAbsoluteTimeGetCurrent() - started);
+    if (areas.count) {
+        NSArray *top = [areas.allObjects sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+            NSUInteger ca = [areas countForObject:a], cb = [areas countForObject:b];
+            return ca > cb ? NSOrderedAscending : ca < cb ? NSOrderedDescending : [a compare:b];
+        }];
+        NSMutableArray *parts = [NSMutableArray new];
+        for (NSString *area in [top subarrayWithRange:NSMakeRange(0, MIN(top.count, (NSUInteger)12))])
+            [parts addObject:[NSString stringWithFormat:@"%@ x%lu", area, (unsigned long)[areas countForObject:area]]];
+        wq_log(@"scan: resolvable areas: %@", [parts componentsJoinedByString:@", "]);
+    }
     return foreign > 0;
 }
 
@@ -1536,6 +1616,16 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_
     // Other apps' containers listed: no scan needed. A list with only this
     // app's own container is not enough.
     if ([listed[roots[0]] count] > 1) return listed;
+    NSString *lsSummary = nil;
+    NSDictionary<NSString *, NSArray<NSString *> *> *lsListed = wq_lsapi_list_containers(roots, &lsSummary);
+    wq_log(@"scan: %@", lsSummary);
+    if (!wq_system_areas_reachable() && [lsListed[roots[0]] count] > 1) {
+        // The API doesn't list daemon containers; those still need the scan
+        // on releases where it works, so only skip it when apps are covered.
+        NSMutableDictionary *merged = [lsListed mutableCopy];
+        if (![merged[roots[2]] count]) merged[roots[2]] = @[];
+        return merged;
+    }
     int64_t probeInode = 0;
     int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
     if (maxInode <= 0) {
@@ -2058,6 +2148,9 @@ NSString *wq_container_label(NSString *dir)
     }
     // Prefer the container-manager query over the metadata plist: it needs no
     // file permission and can also label containers whose plist is root-only.
+    NSString *fromAPI = nil;
+    @synchronized (NSNull.null) { fromAPI = gLSAPILabels[wq_norm(dir)]; }
+    if (fromAPI.length) return fromAPI;
     NSString *queried = wq_container_identifier_map()[WQCanonicalVarPath(dir)];
     if (queried.length) return queried;
     // The LaunchServices database maps app and extension data containers to
