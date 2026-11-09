@@ -629,13 +629,24 @@ static int64_t wq_volume_max_inode(fsid_t fsid)
     NSString *probe = [NSTemporaryDirectory() stringByAppendingPathComponent:
                        [NSString stringWithFormat:@"wq-inode-%u", arc4random()]];
     int fd = open(probe.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) {
+        wq_log(@"inode probe: cannot create %@ (%@)", probe, wq_errno(errno));
+        return 0;
+    }
     struct stat st = {0};
     struct statfs sfs = {0};
-    BOOL ok = fd >= 0 && fstat(fd, &st) == 0 && fstatfs(fd, &sfs) == 0;
-    if (fd >= 0) close(fd);
+    BOOL ok = fstat(fd, &st) == 0 && fstatfs(fd, &sfs) == 0;
+    int err = errno;
+    close(fd);
     unlink(probe.fileSystemRepresentation);
-    if (!ok) return 0;
-    if (memcmp(&sfs.f_fsid, &fsid, sizeof(fsid)) != 0) return 0;  // different volume
+    if (!ok) {
+        wq_log(@"inode probe: cannot inspect %@ (%@)", probe, wq_errno(err));
+        return 0;
+    }
+    if (memcmp(&sfs.f_fsid, &fsid, sizeof(fsid)) != 0) {
+        wq_log(@"inode probe: %@ is on a different volume", probe);
+        return 0;
+    }
     return (int64_t)st.st_ino + 100000;
 }
 
@@ -652,11 +663,12 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode,
     fsid_t fsid = sfs.f_fsid;
     if (maxInode <= 0) {
         maxInode = wq_volume_max_inode(fsid);
-        if (maxInode <= 0) maxInode = 4000000;
-        static dispatch_once_t once;
-        int64_t shown = maxInode;
-        dispatch_once(&once, ^{ wq_log(@"Container scan covers object ids up to %lld", shown); });
+        if (maxInode <= 0) {
+            maxInode = 4000000;
+            wq_log(@"enumerate %@: dynamic inode limit unavailable; falling back to %lld", dir, (long long)maxInode);
+        }
     }
+    wq_log(@"enumerate %@: scanning object ids 1...%lld", dir, (long long)maxInode);
     const char *prefix = base.fileSystemRepresentation;
     size_t prefixLen = strlen(prefix);
     NSMutableArray<NSString *> *found = [NSMutableArray new];
@@ -687,6 +699,7 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode,
         if (progress) progress(nowDone, maxInode, count);
     });
     [found sortUsingSelector:@selector(compare:)];
+    wq_log(@"enumerate %@: found %lu direct child container(s)", dir, (unsigned long)found.count);
     return found;
 }
 

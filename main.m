@@ -1680,6 +1680,7 @@ static NSString *const kCrashLogsPath =
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic) unsigned long long bytes;
+@property (nonatomic) BOOL hasAccess;
 @end
 @implementation WQAppItem
 @end
@@ -1843,7 +1844,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
                 });
             });
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
-        NSUInteger i = 0;
+        NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0;
         for (NSString *c in containers) {
             i++;
             if ([[c stringByResolvingSymlinksInPath] isEqualToString:home]) continue;  // ourselves
@@ -1851,23 +1852,41 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
                 self->_status = [NSString stringWithFormat:@"Measuring %lu/%lu…", (unsigned long)i, (unsigned long)containers.count];
                 [self.tableView reloadData];
             });
-            wq_grant(c);
+            BOOL granted = wq_grant(c);
+            if (!granted) {
+                grantFailures++;
+                if (grantFailures <= 3) wq_log(@"app scan: grant failed for %@", c);
+            }
             NSString *bid = wq_container_label(c);
-            if (!bid) continue;
+            if (!bid.length) {
+                missingLabels++;
+                if (missingLabels <= 3) wq_log(@"app scan: no container identifier for %@", c);
+            }
+            if (!granted || !bid.length) limited++;
             WQAppItem *app = [WQAppItem new];
             app.container = c;
             app.bundleID = bid;
-            app.name = wq_display_name(bid) ?: bid;
-            app.bytes = wq_dir_size(c);
+            app.hasAccess = granted;
+            app.name = bid.length ? (wq_display_name(bid) ?: bid)
+                                  : [NSString stringWithFormat:@"Unknown container (%@)", c.lastPathComponent];
+            app.bytes = granted ? wq_dir_size(c) : 0;
             [apps addObject:app];
         }
         [apps sortUsingComparator:^NSComparisonResult(WQAppItem *a, WQAppItem *b) {
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
+        wq_log(@"app scan: discovered %lu, showing %lu, limited %lu (grant failures %lu, missing labels %lu)",
+               (unsigned long)containers.count, (unsigned long)apps.count, (unsigned long)limited,
+               (unsigned long)grantFailures, (unsigned long)missingLabels);
+        NSString *note = nil;
+        if (!containers) note = @"Container enumeration failed. Check the App Group and see Log.";
+        else if (!containers.count) note = @"No app containers were found. Check the App Group and see Log.";
+        else if (limited) note = [NSString stringWithFormat:@"%lu containers · %lu with limited access or no identifier. See Log.",
+                                  (unsigned long)apps.count, (unsigned long)limited];
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_apps = apps;
             [self.refreshControl endRefreshing];
-            [self setBusy:NO status:nil];
+            [self setBusy:NO status:note];
         });
     });
 }
@@ -1920,8 +1939,15 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     }
     WQAppItem *app = self.visibleApps[(NSUInteger)indexPath.row];
     c.text = app.name;
-    BOOL hasBackup = wq_latest_app_backup(app.bundleID) != nil;
-    c.secondaryText = [NSString stringWithFormat:@"%@ · %@%@", wq_size_text(app.bytes), app.bundleID, hasBackup ? @" · backed up" : @""];
+    NSString *identifier = app.bundleID.length ? app.bundleID : app.container.lastPathComponent;
+    BOOL hasBackup = app.hasAccess && app.bundleID.length && wq_latest_app_backup(app.bundleID) != nil;
+    if (!app.hasAccess) {
+        c.secondaryText = [NSString stringWithFormat:@"Access unavailable · %@", identifier];
+    } else if (!app.bundleID.length) {
+        c.secondaryText = [NSString stringWithFormat:@"%@ · %@ · no identifier", wq_size_text(app.bytes), identifier];
+    } else {
+        c.secondaryText = [NSString stringWithFormat:@"%@ · %@%@", wq_size_text(app.bytes), app.bundleID, hasBackup ? @" · backed up" : @""];
+    }
     c.secondaryTextProperties.color = UIColor.secondaryLabelColor;
     c.image = wq_app_icon(app.bundleID) ?: [UIImage systemImageNamed:@"app.dashed"];
     c.imageProperties.maximumSize = CGSizeMake(36, 36);
@@ -1935,6 +1961,28 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (_busy || !self.visibleApps.count) return;
     WQAppItem *app = self.visibleApps[(NSUInteger)indexPath.row];
+    if (!app.hasAccess || !app.bundleID.length) {
+        NSString *why = app.hasAccess
+            ? @"The container identifier is unavailable. Backup, restore and clear are disabled for this entry."
+            : @"Sandbox access is unavailable. Check the App Group and see Log; only the container path can be copied.";
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:app.name
+            message:[NSString stringWithFormat:@"%@\n\n%@", app.container, why]
+            preferredStyle:UIAlertControllerStyleActionSheet];
+        if (app.hasAccess) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"Open Data Folder" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                [self.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name] animated:YES];
+            }]];
+        }
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Copy Container Path" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            UIPasteboard.generalPasteboard.string = app.container;
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        sheet.popoverPresentationController.sourceView = cell ?: self.view;
+        sheet.popoverPresentationController.sourceRect = (cell ?: self.view).bounds;
+        [self presentViewController:sheet animated:YES completion:nil];
+        return;
+    }
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:app.name
         message:[NSString stringWithFormat:@"%@\n%@ of data", app.bundleID, wq_size_text(app.bytes)]
         preferredStyle:UIAlertControllerStyleActionSheet];
