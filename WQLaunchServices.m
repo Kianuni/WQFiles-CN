@@ -431,6 +431,8 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         // only app containers, so a record type that happens to share a size
         // can't knock out the other table's paths.
         void (^claim)(NSString *, NSString *, NSString *) = ^(NSString *path, NSString *bid, NSString *kind) {
+            // iOS 26 stores /var/mobile/...; lookups use the /private/var form.
+            if ([path hasPrefix:@"/var/"]) path = [@"/private" stringByAppendingString:path];
             if (!wq_is_data_container_path(path) || !wq_looks_like_bundle_id(bid) || ![path containsString:kind]) return;
             id known = layoutContainers[path];
             if (!known) layoutContainers[path] = bid;
