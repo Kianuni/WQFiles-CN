@@ -260,7 +260,7 @@ static BOOL wq_stream(int in, int out, NSString **errorText)
         for (ssize_t done = 0; done < n; ) {
             ssize_t w = write(out, buf + done, (size_t)(n - done));
             if (w < 0 && errno == EINTR) continue;
-            if (w <= 0) { ok = NO; if (errorText) *errorText = wq_errno(errno); break; }
+            if (w <= 0) { ok = NO; if (errorText) *errorText = wq_errno(w == 0 ? EIO : errno); break; }
             done += w;
         }
         if (!ok) break;
@@ -286,30 +286,77 @@ static BOOL wq_copy_file_out(NSString *path, NSString *dest, NSString **errorTex
 }
 
 // Backups/<yyyyMMdd-HHmmss-SSS-n>/<original absolute path>. The stamp is
-// unique per operation, so two saves in the same second never collide.
-static BOOL wq_backup(NSString *path)
+// unique per operation, so two saves in the same second never collide. Writes
+// in our own container use a private temporary rollback copy instead.
+static BOOL wq_backup(NSString *path, NSString **backupPath)
 {
-    if (wq_is_own(path)) return YES;
-    static NSDateFormatter *fmt;
-    static int counter;
-    static NSLock *lock;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        fmt = [NSDateFormatter new];
-        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-        fmt.dateFormat = @"yyyyMMdd-HHmmss-SSS";
-        lock = [NSLock new];
-    });
-    [lock lock];
-    NSString *stamp = [NSString stringWithFormat:@"%@-%d", [fmt stringFromDate:NSDate.date], ++counter];
-    [lock unlock];
-    NSString *dest = [[wq_backup_root() stringByAppendingPathComponent:stamp] stringByAppendingPathComponent:wq_norm(path)];
-    [NSFileManager.defaultManager createDirectoryAtPath:dest.stringByDeletingLastPathComponent
-                            withIntermediateDirectories:YES attributes:nil error:nil];
+    BOOL own = wq_is_own(path);
+    if (own && !backupPath) return YES;
+    NSString *dest = nil;
+    if (own) {
+        dest = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                [@"wq-rollback-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    } else {
+        static NSDateFormatter *fmt;
+        static int counter;
+        static NSLock *lock;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            fmt = [NSDateFormatter new];
+            fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+            fmt.dateFormat = @"yyyyMMdd-HHmmss-SSS";
+            lock = [NSLock new];
+        });
+        [lock lock];
+        NSString *stamp = [NSString stringWithFormat:@"%@-%d", [fmt stringFromDate:NSDate.date], ++counter];
+        [lock unlock];
+        dest = [[wq_backup_root() stringByAppendingPathComponent:stamp] stringByAppendingPathComponent:wq_norm(path)];
+    }
+    NSError *dirError = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtPath:dest.stringByDeletingLastPathComponent
+                                 withIntermediateDirectories:YES attributes:nil error:&dirError]) {
+        wq_log(@"backup: cannot create folder for %@: %@", path, dirError);
+        return NO;
+    }
     NSString *error = nil;
     BOOL ok = wq_copy_file_out(path, dest, &error);
     wq_log(@"backup: %@ -> %@", path, ok ? dest : [@"FAILED: " stringByAppendingString:error ?: @"?"]);
+    if (ok && backupPath) *backupPath = dest;
     return ok;
+}
+
+// Restores the backup through the normal access path. This deliberately keeps
+// the destination inode and metadata, just like the original in-place write.
+static BOOL wq_restore_backup(NSString *path, NSString *backup, NSString **errorText)
+{
+    int in = open(backup.fileSystemRepresentation, O_RDONLY);
+    if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    int out = wq_open(path, O_WRONLY | O_TRUNC, 0);
+    if (out < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
+    BOOL ok = wq_stream(in, out, errorText);
+    int saved = errno;
+    close(in);
+    if (close(out) != 0 && ok) { ok = NO; if (errorText) *errorText = wq_errno(errno); }
+    if (!ok && errorText && !*errorText) *errorText = wq_errno(saved);
+    return ok;
+}
+
+static void wq_report_write_failure(NSString *path, NSString *backup, NSString *failure, NSString **errorText)
+{
+    NSString *rollbackError = nil;
+    BOOL restored = backup && wq_restore_backup(path, backup, &rollbackError);
+    NSString *message = restored
+        ? [NSString stringWithFormat:@"%@; the original contents were restored", failure]
+        : [NSString stringWithFormat:@"%@; rollback %@. Backup: %@", failure,
+           backup ? [@"also failed: " stringByAppendingString:rollbackError ?: @"unknown error"] : @"was unavailable",
+           backup ?: @"none"];
+    wq_log(@"write failure: %@ -> %@", path, message);
+    if (errorText) *errorText = message;
+}
+
+static void wq_discard_temporary_backup(NSString *path, NSString *backup)
+{
+    if (backup && wq_is_own(path)) [NSFileManager.defaultManager removeItemAtPath:backup error:nil];
 }
 
 NSString *wq_backup_original_path(NSString *backupPath)
@@ -394,6 +441,7 @@ static BOOL wq_write_all(int fd, NSData *data)
             if (errno == EINTR) continue;
             return NO;
         }
+        if (n == 0) { errno = EIO; return NO; }
         p += n;
         left -= (NSUInteger)n;
     }
@@ -410,20 +458,23 @@ static BOOL wq_finish_fd(int fd, BOOL ok, int *err)
 
 BOOL wq_write(NSString *path, NSData *data, NSString **errorText)
 {
-    if (!wq_backup(path)) {
+    NSString *backup = nil;
+    if (!wq_backup(path, &backup)) {
         if (errorText) *errorText = @"Backup of the current file failed, nothing was written";
         return NO;
     }
     int fd = wq_open(path, O_WRONLY | O_TRUNC, 0);
     if (fd < 0) {
         if (errorText) *errorText = wq_errno(errno);
+        wq_discard_temporary_backup(path, backup);
         return NO;
     }
     BOOL ok = wq_write_all(fd, data);
     int err = errno;
     ok = wq_finish_fd(fd, ok, &err);
     wq_log(@"write: %@ (%lu bytes) -> %@", path, (unsigned long)data.length, ok ? @"OK" : wq_errno(err));
-    if (!ok && errorText) *errorText = [NSString stringWithFormat:@"%@ (the previous contents are in Backups)", wq_errno(err)];
+    if (!ok) wq_report_write_failure(path, backup, wq_errno(err), errorText);
+    else wq_discard_temporary_backup(path, backup);
     return ok;
 }
 
@@ -431,19 +482,26 @@ BOOL wq_write_from_file(NSString *path, NSString *source, NSString **errorText)
 {
     int in = open(source.fileSystemRepresentation, O_RDONLY);
     if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
-    if (!wq_backup(path)) {
+    NSString *backup = nil;
+    if (!wq_backup(path, &backup)) {
         close(in);
         if (errorText) *errorText = @"Backup of the current file failed, nothing was written";
         return NO;
     }
     int fd = wq_open(path, O_WRONLY | O_TRUNC, 0);
-    if (fd < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
+    if (fd < 0) {
+        if (errorText) *errorText = wq_errno(errno);
+        close(in);
+        wq_discard_temporary_backup(path, backup);
+        return NO;
+    }
     NSString *error = nil;
     BOOL ok = wq_stream(in, fd, &error);
     close(in);
     if (close(fd) != 0 && ok) { ok = NO; error = wq_errno(errno); }
     wq_log(@"write: %@ from %@ -> %@", path, source.lastPathComponent, ok ? @"OK" : error);
-    if (!ok && errorText) *errorText = [NSString stringWithFormat:@"%@ (the previous contents are in Backups)", error];
+    if (!ok) wq_report_write_failure(path, backup, error ?: @"Write failed", errorText);
+    else wq_discard_temporary_backup(path, backup);
     return ok;
 }
 
@@ -509,18 +567,25 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
         if (errorText) *errorText = @"Not a regular file";
         return NO;
     }
+    unsigned long long size = (unsigned long long)before.st_size;
     for (NSNumber *off in runs) {
-        if (off.unsignedLongLongValue + runs[off].length > (unsigned long long)before.st_size) {
+        unsigned long long start = off.unsignedLongLongValue;
+        if (start > size || runs[off].length > size - start) {
             if (errorText) *errorText = @"A change lies past the end of the file";
             return NO;
         }
     }
-    if (!wq_backup(path)) {
+    NSString *backup = nil;
+    if (!wq_backup(path, &backup)) {
         if (errorText) *errorText = @"Backup of the current file failed, nothing was written";
         return NO;
     }
     int fd = wq_open(path, O_WRONLY, 0);
-    if (fd < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    if (fd < 0) {
+        if (errorText) *errorText = wq_errno(errno);
+        wq_discard_temporary_backup(path, backup);
+        return NO;
+    }
     BOOL ok = YES;
     int err = 0;
     NSUInteger bytes = 0;
@@ -529,7 +594,7 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
         for (NSUInteger done = 0; ok && done < run.length; ) {
             ssize_t n = pwrite(fd, (const uint8_t *)run.bytes + done, run.length - done, (off_t)(off.unsignedLongLongValue + done));
             if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) { ok = NO; err = errno; break; }
+            if (n <= 0) { ok = NO; err = n == 0 ? EIO : errno; break; }
             done += (NSUInteger)n;
         }
         if (!ok) break;
@@ -538,7 +603,8 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
     ok = wq_finish_fd(fd, ok, &err);
     wq_log(@"patch: %@ (%lu bytes in %lu runs) -> %@", path, (unsigned long)bytes, (unsigned long)runs.count,
            ok ? @"OK" : wq_errno(err));
-    if (!ok && errorText) *errorText = [NSString stringWithFormat:@"%@ (the previous contents are in Backups)", wq_errno(err)];
+    if (!ok) wq_report_write_failure(path, backup, wq_errno(err), errorText);
+    else wq_discard_temporary_backup(path, backup);
     return ok;
 }
 
@@ -582,7 +648,7 @@ BOOL wq_delete(NSString *path, NSString **errorText)
         if (rc != 0 && wq_is_denied(errno) && wq_grant(path.stringByDeletingLastPathComponent))
             rc = rmdir(path.fileSystemRepresentation);
     } else {
-        if (S_ISREG(st.st_mode) && !wq_backup(path)) {
+        if (S_ISREG(st.st_mode) && !wq_backup(path, NULL)) {
             if (errorText) *errorText = @"Backup failed, nothing was deleted";
             return NO;
         }
