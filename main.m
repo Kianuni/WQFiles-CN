@@ -13,6 +13,7 @@
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import "WQAccess.h"
+#import "WQLaunchServices.h"
 #import "WQUI.h"
 #import "WQSharing.h"
 #import "WQDir.h"
@@ -543,7 +544,7 @@ static NSString *wq_folder_date_text(NSDate *date)
 {
     [super viewDidLoad];
     self.refreshControl = [UIRefreshControl new];
-    [self.refreshControl addTarget:self action:@selector(reload) forControlEvents:UIControlEventValueChanged];
+    [self.refreshControl addTarget:self action:@selector(userRefresh) forControlEvents:UIControlEventValueChanged];
     __weak typeof(self) weakSelf = self;
     NSString *path = _path;
     NSMutableArray<UIMenuElement *> *menuItems = [NSMutableArray new];
@@ -774,6 +775,14 @@ static NSString *wq_folder_date_text(NSDate *date)
         } failure:@"Cannot delete backups"];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+// Pull to refresh: container lists are scanned again instead of reused.
+- (void)userRefresh
+{
+    wq_enumerate_invalidate();
+    wq_display_names_reset_miss();
+    [self reload];
 }
 
 - (void)reload

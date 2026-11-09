@@ -1229,6 +1229,166 @@ static int64_t wq_volume_max_inode(fsid_t fsid, int64_t *probeInode)
     return 0;
 }
 
+// Scans object ids 1...maxInode once and collects the direct children of every
+// base in `bases` (each a /private/var/... path). Uses at most 4 worker threads
+// (half the cores) at utility priority: a full scan of a well-used device is
+// millions of ids, and running it on every core made phones hot. Returns one
+// array per base, or nil when cancelled.
+static NSArray<NSMutableArray<NSString *> *> *wq_scan_children(fsid_t fsid, int64_t maxInode, NSArray<NSString *> *bases,
+                                                               WQScanCancellation *cancellation,
+                                                               void (^progress)(int64_t, int64_t, NSUInteger),
+                                                               NSUInteger reportBase)
+{
+    NSUInteger baseCount = MIN(bases.count, (NSUInteger)8);
+    // Heap tables: blocks can't capture C arrays.
+    char **prefixes = calloc(8, sizeof(char *));
+    size_t *prefixLens = calloc(8, sizeof(size_t));
+    if (!prefixes || !prefixLens) { free(prefixes); free(prefixLens); return nil; }
+    NSMutableArray<NSMutableArray<NSString *> *> *found = [NSMutableArray new];
+    for (NSUInteger i = 0; i < baseCount; i++) {
+        prefixes[i] = strdup(bases[i].fileSystemRepresentation);
+        prefixLens[i] = strlen(prefixes[i]);
+        [found addObject:[NSMutableArray new]];
+    }
+    NSLock *lock = [NSLock new];
+    const int64_t chunk = 32768;
+    int64_t chunks = (maxInode + chunk - 1) / chunk;
+    __block int64_t nextChunk = 0, done = 0;
+    NSUInteger cores = NSProcessInfo.processInfo.activeProcessorCount;
+    size_t workers = (size_t)MAX((NSUInteger)1, MIN((NSUInteger)4, cores / 2));
+    dispatch_apply(workers, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(size_t __unused w) {
+        fsid_t id = fsid;
+        char buf[1200];
+        for (;;) {
+            if (cancellation.isCancelled) return;
+            [lock lock];
+            int64_t c = nextChunk++;
+            [lock unlock];
+            if (c >= chunks) return;
+            int64_t first = c * chunk + 1, last = MIN(first + chunk - 1, maxInode);
+            NSMutableArray *local[8] = {nil};
+            for (int64_t ino = first; ino <= last; ino++) {
+                if ((ino & 127) == 0 && cancellation.isCancelled) return;
+                ssize_t n = fsgetpath(buf, sizeof(buf), &id, (uint64_t)ino);
+                if (n <= 0) continue;
+                // fsgetpath returns /private/var/...; bases are normalized the same way.
+                for (NSUInteger i = 0; i < baseCount; i++) {
+                    if (strncmp(buf, prefixes[i], prefixLens[i]) == 0 && buf[prefixLens[i]] == '/' &&
+                        strchr(buf + prefixLens[i] + 1, '/') == NULL) {
+                        if (!local[i]) local[i] = [NSMutableArray new];
+                        [local[i] addObject:[NSString stringWithUTF8String:buf]];
+                        break;
+                    }
+                }
+            }
+            [lock lock];
+            for (NSUInteger i = 0; i < baseCount; i++) if (local[i]) [found[i] addObjectsFromArray:local[i]];
+            done += last - first + 1;
+            int64_t nowDone = done;
+            NSUInteger count = reportBase < found.count ? found[reportBase].count : 0;
+            [lock unlock];
+            if (progress && !cancellation.isCancelled) progress(nowDone, maxInode, count);
+        }
+    });
+    for (NSUInteger i = 0; i < baseCount; i++) free(prefixes[i]);
+    free(prefixes);
+    free(prefixLens);
+    if (cancellation.isCancelled) return nil;
+    for (NSMutableArray *list in found) [list sortUsingSelector:@selector(compare:)];
+    return found;
+}
+
+static void wq_check_scan_completion(fsid_t fsid, int64_t probeInode, NSString *what)
+{
+    if (probeInode <= 0) return;
+    int64_t afterProbe = 0;
+    if (wq_volume_max_inode(fsid, &afterProbe) <= 0 || afterProbe <= 0) {
+        // A completion probe failure must not turn a usable partial list
+        // into "no apps at all". The initial bound still found what it
+        // scanned; callers can refresh later.
+        wq_log(@"enumerate %@: completion probe unavailable; returning the scanned subset", what);
+    } else if (afterProbe > probeInode + kWQInodeMargin) {
+        wq_log(@"enumerate %@: inode IDs advanced beyond the scanned bound; the list may be incomplete until refreshed", what);
+    }
+}
+
+// The three container parents that can only be listed by scanning. One scan
+// collects all three and is reused for a while: the Cache Cleaner alone used to
+// scan the whole id range three times (apps, extensions, and the daemon scan
+// that finds the app name database).
+static NSArray<NSString *> *wq_shared_scan_roots(void)
+{
+    return @[ @"/private/var/mobile/Containers/Data/Application",
+              @"/private/var/mobile/Containers/Data/PluginKitPlugin",
+              @"/private/var/mobile/Containers/Data/InternalDaemon" ];
+}
+static const NSTimeInterval kWQSharedScanTTL = 600;
+static NSLock *gSharedScanLock;
+static NSObject *gSharedScanGuard;
+static NSDictionary<NSString *, NSArray<NSString *> *> *gSharedScan;
+static NSTimeInterval gSharedScanAt;
+
+static void wq_shared_scan_setup(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gSharedScanLock = [NSLock new]; gSharedScanGuard = [NSObject new]; });
+}
+
+void wq_enumerate_invalidate(void)
+{
+    wq_shared_scan_setup();
+    @synchronized (gSharedScanGuard) {
+        gSharedScan = nil;
+        gSharedScanAt = 0;
+    }
+}
+
+static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQScanCancellation *cancellation,
+                                               void (^progress)(int64_t, int64_t, NSUInteger))
+{
+    wq_shared_scan_setup();
+    // One scan at a time; a second caller waits and then uses its result.
+    while (![gSharedScanLock lockBeforeDate:[NSDate dateWithTimeIntervalSinceNow:0.2]]) {
+        if (cancellation.isCancelled) return nil;
+    }
+    NSArray<NSString *> *result = nil;
+    @try {
+        NSDictionary *cached = nil;
+        @synchronized (gSharedScanGuard) {
+            if (gSharedScan && NSDate.date.timeIntervalSinceReferenceDate - gSharedScanAt < kWQSharedScanTTL) cached = gSharedScan;
+        }
+        if (cached) {
+            result = cached[base];
+            if (progress) progress(1, 1, result.count);
+            return result;
+        }
+        int64_t probeInode = 0;
+        int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
+        if (maxInode <= 0) {
+            wq_log(@"enumerate %@: dynamic inode limit unavailable; refusing to present a fixed-range partial scan as complete", base);
+            return nil;
+        }
+        if (maxInode > INT64_MAX - 32768) {
+            wq_log(@"enumerate %@: inode bound is too large to scan safely", base);
+            return nil;
+        }
+        NSArray<NSString *> *roots = wq_shared_scan_roots();
+        NSArray *lists = wq_scan_children(fsid, maxInode, roots, cancellation, progress, [roots indexOfObject:base]);
+        if (!lists) return nil;
+        wq_check_scan_completion(fsid, probeInode, @"containers");
+        NSMutableDictionary *scan = [NSMutableDictionary new];
+        for (NSUInteger i = 0; i < roots.count; i++) scan[roots[i]] = [lists[i] copy];
+        @synchronized (gSharedScanGuard) {
+            gSharedScan = scan;
+            gSharedScanAt = NSDate.date.timeIntervalSinceReferenceDate;
+        }
+        result = scan[base];
+    } @finally {
+        [gSharedScanLock unlock];
+    }
+    return result;
+}
+
 NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancellation *cancellation,
                                   void (^progress)(int64_t, int64_t, NSUInteger))
 {
@@ -1256,6 +1416,8 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
     }
     fsid_t fsid = sfs.f_fsid;
     BOOL dynamicBound = maxInode <= 0;
+    if (dynamicBound && [wq_shared_scan_roots() containsObject:base])
+        return wq_shared_children(base, fsid, cancellation, progress);
     int64_t probeInode = 0;
     if (dynamicBound) {
         maxInode = wq_volume_max_inode(fsid, &probeInode);
@@ -1268,53 +1430,10 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
         wq_log(@"enumerate %@: inode bound is too large to scan safely", dir);
         return nil;
     }
-    const char *prefix = base.fileSystemRepresentation;
-    size_t prefixLen = strlen(prefix);
-    NSMutableArray<NSString *> *found = [NSMutableArray new];
-    NSLock *lock = [NSLock new];
-
-    // fsgetpath is a plain syscall; scan the id range in chunks on all cores.
-    const int64_t chunk = 32768;
-    size_t chunks = (size_t)((maxInode + chunk - 1) / chunk);
-    __block int64_t done = 0;
-    dispatch_apply(chunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
-        if (cancellation.isCancelled) return;
-        int64_t first = (int64_t)c * chunk + 1, last = MIN(first + chunk - 1, maxInode);
-        NSMutableArray *local = [NSMutableArray new];
-        fsid_t id = fsid;
-        char buf[1200];
-        for (int64_t ino = first; ino <= last; ino++) {
-            if ((ino & 127) == 0 && cancellation.isCancelled) return;
-            ssize_t n = fsgetpath(buf, sizeof(buf), &id, (uint64_t)ino);
-            // fsgetpath returns /private/var/...; base is normalized the same way.
-            if (n > 0 && strncmp(buf, prefix, prefixLen) == 0 && buf[prefixLen] == '/' &&
-                strchr(buf + prefixLen + 1, '/') == NULL)
-                [local addObject:[NSString stringWithUTF8String:buf]];
-        }
-        [lock lock];
-        [found addObjectsFromArray:local];
-        done += last - first + 1;
-        int64_t nowDone = done;
-        NSUInteger count = found.count;
-        [lock unlock];
-        if (progress && !cancellation.isCancelled) progress(nowDone, maxInode, count);
-    });
-    if (cancellation.isCancelled) {
-        return nil;
-    }
-    if (dynamicBound && probeInode > 0) {
-        int64_t afterProbe = 0;
-        if (wq_volume_max_inode(fsid, &afterProbe) <= 0 || afterProbe <= 0) {
-            // A completion probe failure must not turn a usable partial list
-            // into "no apps at all". The initial bound still found what it
-            // scanned; callers can refresh later.
-            wq_log(@"enumerate %@: completion probe unavailable; returning the scanned subset", dir);
-        } else if (afterProbe > probeInode + kWQInodeMargin) {
-            wq_log(@"enumerate %@: inode IDs advanced beyond the scanned bound; the list may be incomplete until refreshed", dir);
-        }
-    }
-    [found sortUsingSelector:@selector(compare:)];
-    return found;
+    NSArray *lists = wq_scan_children(fsid, maxInode, @[base], cancellation, progress, 0);
+    if (!lists) return nil;
+    if (dynamicBound) wq_check_scan_completion(fsid, probeInode, dir);
+    return lists.firstObject;
 }
 
 BOOL wq_stat(NSString *path, struct stat *st)

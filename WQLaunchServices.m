@@ -21,6 +21,10 @@
 // the built-in table below covers those.
 
 static NSString *const kWQLSStoreKey = @"WQLaunchServicesStore";
+// When the database wasn't found: don't search again for a day (each search
+// lists every daemon container), unless the user refreshes.
+static NSString *const kWQLSMissKey = @"WQLaunchServicesStoreMissedAt";
+static const NSTimeInterval kWQLSMissRetry = 24 * 60 * 60;
 
 // These limits keep a malformed or unexpectedly large database from turning a
 // synchronous display-name lookup into an unbounded read/parse operation.
@@ -39,7 +43,7 @@ static NSObject *wq_ls_lock(void)
     return lock;
 }
 
-static NSString *wq_find_ls_store(void);
+static NSString *wq_find_ls_store(BOOL *searched);
 static BOOL wq_ls_candidate_info(NSString *path, struct stat *st);
 
 static BOOL wq_ls_stat_equal(const struct stat *a, const struct stat *b)
@@ -107,8 +111,11 @@ static void wq_ls_consider_candidate(NSString *path, NSString **bestPath,
     }
 }
 
-static NSString *wq_find_ls_store(void)
+// *searched: the daemon containers were actually listed (a failed or cancelled
+// scan says nothing about whether the database exists).
+static NSString *wq_find_ls_store(BOOL *searched)
 {
+    if (searched) *searched = NO;
     NSString *cached = [NSUserDefaults.standardUserDefaults stringForKey:kWQLSStoreKey];
     NSString *bestPath = nil;
     struct stat best = {0};
@@ -118,6 +125,7 @@ static NSString *wq_find_ls_store(void)
     if (cachedValid) wq_ls_consider_candidate(cached, &bestPath, &best, seen);
 
     NSArray *daemons = wq_enumerate(@"/private/var/mobile/Containers/Data/InternalDaemon", 0, nil, nil);
+    if (daemons && searched) *searched = YES;
     if (daemons) {
         for (NSString *container in daemons) {
             NSString *caches = [container stringByAppendingPathComponent:@"Library/Caches"];
@@ -346,14 +354,32 @@ static void wq_load_ls_names_locked(void)
         }
     } else if (!gLSLoaded && now < gLSNextRetryAt) {
         return;
+    } else if (!gLSLoaded && ![NSUserDefaults.standardUserDefaults stringForKey:kWQLSStoreKey].length) {
+        NSDate *missed = [NSUserDefaults.standardUserDefaults objectForKey:kWQLSMissKey];
+        if ([missed isKindOfClass:NSDate.class] && now - missed.timeIntervalSinceReferenceDate < kWQLSMissRetry &&
+            now >= missed.timeIntervalSinceReferenceDate) {
+            gLSNextRetryAt = missed.timeIntervalSinceReferenceDate + kWQLSMissRetry;
+            return;
+        }
     }
 
-    NSString *path = wq_find_ls_store();
+    BOOL hadLocation = [NSUserDefaults.standardUserDefaults stringForKey:kWQLSStoreKey].length > 0;
+    BOOL searched = NO;
+    NSString *path = wq_find_ls_store(&searched);
     if (!path) {
         wq_ls_clear_snapshot_if_changed(currentChanged);
-        wq_ls_note_failure(now, @"LaunchServices database not found");
+        if (!hadLocation && searched) {
+            // Never found, after a complete search: wait a day (or a refresh).
+            [NSUserDefaults.standardUserDefaults setObject:NSDate.date forKey:kWQLSMissKey];
+            gLSNextRetryAt = now + kWQLSMissRetry;
+            wq_log(@"names: LaunchServices database not found; searching again in a day or on refresh");
+        } else {
+            // A known database that's briefly unreadable, or a scan that failed.
+            wq_ls_note_failure(now, @"LaunchServices database not found");
+        }
         return;
     }
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:kWQLSMissKey];
 
     struct stat before;
     if (!wq_ls_candidate_info(path, &before)) {
@@ -472,6 +498,25 @@ static NSString *wq_known_name_locked(NSString *bundleID)
 {
     wq_load_ls_names_locked();
     return gLSDisplay[bundleID] ?: wq_builtin_names()[bundleID] ?: gLSBundleName[bundleID];
+}
+
+BOOL wq_display_names_loaded(void)
+{
+    @synchronized (wq_ls_lock()) { return gLSLoaded; }
+}
+
+void wq_load_display_names(void)
+{
+    @synchronized (wq_ls_lock()) { wq_load_ls_names_locked(); }
+}
+
+void wq_display_names_reset_miss(void)
+{
+    @synchronized (wq_ls_lock()) {
+        [NSUserDefaults.standardUserDefaults removeObjectForKey:kWQLSMissKey];
+        gLSNextRetryAt = 0;
+        gLSFailureCount = 0;
+    }
 }
 
 NSString *wq_display_name(NSString *bundleID)

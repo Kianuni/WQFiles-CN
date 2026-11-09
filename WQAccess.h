@@ -106,8 +106,13 @@ BOOL wq_stat(NSString *path, struct stat *st);
 // token on dir. maxInode bounds the scan (0 = up to the newest id on the
 // volume); progress is called off the main thread, from several threads.
 // Returns absolute child paths, sorted, or nil on failure/cancellation, including
-// when the dynamic bound cannot be discovered or a completion probe shows that
-// inode IDs advanced beyond the scanned range. No implicit fixed-range fallback.
+// when the dynamic bound cannot be discovered. No implicit fixed-range fallback.
+// With maxInode 0, the App Data, Extensions and Internal Daemons parents are
+// scanned together in one pass and the result is reused for 10 minutes (or
+// until wq_enumerate_invalidate); concurrent callers wait for that one scan.
+// Forget the shared container scan (App Data, Extensions, Internal Daemons),
+// so the next wq_enumerate of those scans again. Call on a user's refresh.
+void wq_enumerate_invalidate(void);
 NSArray<NSString *> *_Nullable wq_enumerate(NSString *dir, int64_t maxInode,
                                             WQScanCancellation *_Nullable cancellation,
                                             void (^_Nullable progress)(int64_t done, int64_t total, NSUInteger found));

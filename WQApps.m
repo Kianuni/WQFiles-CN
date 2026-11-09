@@ -9,6 +9,7 @@
 #import "WQUI.h"
 #import "WQSharing.h"
 #import "WQAccess.h"
+#import "WQLaunchServices.h"
 #import "WQCore.h"
 #import "WQAppsSupport.h"
 #import <errno.h>
@@ -422,7 +423,16 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
     self.definesPresentationContext = YES;
     self.tableView.tableHeaderView = wq_device_header(self.view.bounds.size.width);
     self.refreshControl = [UIRefreshControl new];
-    [self.refreshControl addTarget:self action:@selector(scan) forControlEvents:UIControlEventValueChanged];
+    [self.refreshControl addTarget:self action:@selector(userRefresh) forControlEvents:UIControlEventValueChanged];
+    [self scan];
+}
+
+// Pull to refresh: rescan the containers instead of reusing the shared scan,
+// and look for the app name database again if it wasn't found before.
+- (void)userRefresh
+{
+    wq_enumerate_invalidate();
+    wq_display_names_reset_miss();
     [self scan];
 }
 
@@ -463,6 +473,14 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
                     [self.tableView reloadData];
                 });
             });
+        if (!cancellation.isCancelled && !wq_display_names_loaded()) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (generation != self->_scanGeneration || cancellation.isCancelled) return;
+                self->_status = @"Reading app names…";
+                [self.tableView reloadData];
+            });
+            wq_load_display_names();
+        }
         if (!containers) wq_log(@"app scan: container enumeration failed; see the preceding enumerate log");
         else if (containers.count == 0) wq_log(@"app scan: enumeration returned no container paths; check the base path and inode bound");
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
