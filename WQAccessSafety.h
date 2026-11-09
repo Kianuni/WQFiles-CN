@@ -99,7 +99,22 @@ static inline BOOL WQWriteBytes(int fd, NSData *data)
 // A durable intent file precedes the rename. The preserved directory itself is
 // never removed. Recovery accepts only our exact symlink or the original inode.
 static const char *const WQCacheMarker = ".wq-caches-swap.plist";
+static const char *const WQCacheMarkerTemp = ".wq-caches-swap.plist.tmp";
 static const char *const WQCacheSaved = ".wq-caches-preserved";
+
+// An invalid marker means Begin never completed the marker write, so no swap
+// should have started. It is safe to discard only when Caches is still a real
+// directory and no preserved directory exists. Otherwise fail closed.
+static inline BOOL WQCacheInvalidMarkerCanBeDiscarded(int library)
+{
+    struct stat saved, caches;
+    if (fstatat(library, WQCacheSaved, &saved, AT_SYMLINK_NOFOLLOW) == 0) { errno = EEXIST; return NO; }
+    if (errno != ENOENT) return NO;
+    if (fstatat(library, "Caches", &caches, AT_SYMLINK_NOFOLLOW) != 0) return NO;
+    if (!S_ISDIR(caches.st_mode)) { errno = EINVAL; return NO; }
+    if (unlinkat(library, WQCacheMarker, 0) != 0) return NO;
+    return fsync(library) == 0;
+}
 
 static inline BOOL WQCacheSwapRecover(int library)
 {
@@ -111,20 +126,31 @@ static inline BOOL WQCacheSwapRecover(int library)
         return errno == ENOENT;
     }
     struct stat ms;
-    if (fstat(marker, &ms) != 0 || ms.st_size <= 0 || ms.st_size > 65536) { close(marker); errno = EINVAL; return NO; }
+    if (fstat(marker, &ms) != 0 || ms.st_size <= 0 || ms.st_size > 65536) {
+        close(marker);
+        errno = EINVAL;
+        return WQCacheInvalidMarkerCanBeDiscarded(library);
+    }
     NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)ms.st_size];
     size_t done = 0;
     while (done < data.length) {
         ssize_t n = read(marker, (uint8_t *)data.mutableBytes + done, data.length - done);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) { close(marker); errno = EIO; return NO; }
+        if (n <= 0) {
+            close(marker);
+            errno = EIO;
+            return WQCacheInvalidMarkerCanBeDiscarded(library);
+        }
         done += (size_t)n;
     }
     close(marker);
     id record = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil];
     if (![record isKindOfClass:NSDictionary.class] || ![record[@"Format"] isEqual:@1] ||
         ![record[@"Device"] isKindOfClass:NSNumber.class] || ![record[@"Inode"] isKindOfClass:NSNumber.class] ||
-        ![record[@"Target"] isKindOfClass:NSString.class]) { errno = EINVAL; return NO; }
+        ![record[@"Target"] isKindOfClass:NSString.class]) {
+        errno = EINVAL;
+        return WQCacheInvalidMarkerCanBeDiscarded(library);
+    }
     struct stat original = {0}, current = {0};
     original.st_dev = [record[@"Device"] intValue];
     original.st_ino = [record[@"Inode"] unsignedLongLongValue];
@@ -187,11 +213,22 @@ static inline BOOL WQCacheSwapBegin(int library, NSString *target)
     NSDictionary *record = @{ @"Format": @1, @"Device": @(st.st_dev), @"Inode": @(st.st_ino), @"Target": target };
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:record format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
     if (!data) { errno = EINVAL; return NO; }
-    int marker = WQOpenRegularAt(library, WQCacheMarker, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    // A failed marker write must never leave a partial marker behind: write a
+    // temporary sibling, flush it, then atomically rename it into place.
+    unlinkat(library, WQCacheMarkerTemp, 0);
+    int marker = WQOpenRegularAt(library, WQCacheMarkerTemp, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (marker < 0) return NO;
     BOOL durable = WQWriteBytes(marker, data);
     if (close(marker) != 0) durable = NO;
-    if (!durable || fsync(library) != 0) return NO;
+    if (!durable || fsync(library) != 0) {
+        unlinkat(library, WQCacheMarkerTemp, 0);
+        return NO;
+    }
+    if (renameatx_np(library, WQCacheMarkerTemp, library, WQCacheMarker, RENAME_EXCL) != 0) {
+        unlinkat(library, WQCacheMarkerTemp, 0);
+        return NO;
+    }
+    if (fsync(library) != 0) return NO;
     if (renameatx_np(library, "Caches", library, WQCacheSaved, RENAME_EXCL) != 0 || fsync(library) != 0) return NO;
     return symlinkat(target.fileSystemRepresentation, library, "Caches") == 0 && fsync(library) == 0;
 }

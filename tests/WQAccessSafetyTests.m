@@ -45,6 +45,41 @@ int main(void)
             close(lock);
             check(WQRecoverCacheSwapAtPath(library) && [[NSData dataWithContentsOfFile:sentinel] isEqual:bytes], @"startup restores interrupted cache swap without a token query");
             check(WQRecoverCacheSwapAtPath([base stringByAppendingPathComponent:@"absent"]), @"startup does not create an absent Library");
+            // A marker left behind by a failed write must not disable recovery
+            // when the original Caches directory is intact.
+            int broken = openat(fd, WQCacheMarker, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            check(broken >= 0, @"create zero-length marker fixture");
+            close(broken);
+            check(WQCacheSwapRecover(fd), @"zero-length marker is discarded when Caches is intact");
+            check(![fm fileExistsAtPath:[library stringByAppendingPathComponent:@".wq-caches-swap.plist"]], @"invalid marker removed");
+            broken = openat(fd, WQCacheMarker, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            check(broken >= 0 && write(broken, "partial", 7) == 7, @"create partial marker fixture");
+            close(broken);
+            check(WQCacheSwapRecover(fd), @"partial marker is discarded when Caches is intact");
+
+            // A stale temporary marker must not block the next swap.
+            broken = openat(fd, ".wq-caches-swap.plist.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            check(broken >= 0 && write(broken, "stale", 5) == 5, @"create stale temporary marker");
+            close(broken);
+            check(WQCacheSwapBegin(fd, @"/private/var/nonexistent-token-target"), @"begin cleans a stale temporary marker");
+            check(WQCacheSwapRecover(fd), @"recover stale temporary marker fixture");
+
+            // If recovery material exists, an invalid marker must fail closed.
+            NSString *library2 = [base stringByAppendingPathComponent:@"Library2"];
+            NSString *nested2 = [library2 stringByAppendingPathComponent:@"Caches/nested"];
+            check([fm createDirectoryAtPath:nested2 withIntermediateDirectories:YES attributes:nil error:nil], @"create second library fixture");
+            NSString *sentinel2 = [nested2 stringByAppendingPathComponent:@"sentinel"];
+            check([bytes writeToFile:sentinel2 atomically:YES], @"write second sentinel");
+            int fd2 = WQOpenDirectoryNoLinks(library2);
+            check(fd2 >= 0, @"open second library");
+            check(WQCacheSwapBegin(fd2, @"/private/var/nonexistent-token-target"), @"begin second swap");
+            broken = openat(fd2, WQCacheMarker, O_WRONLY | O_TRUNC);
+            check(broken >= 0 && write(broken, "garbage", 7) == 7, @"corrupt marker with preserved data");
+            close(broken);
+            check(!WQCacheSwapRecover(fd2), @"invalid marker with preserved data fails closed");
+            check([fm fileExistsAtPath:[library2 stringByAppendingPathComponent:@".wq-caches-preserved/nested/sentinel"]], @"preserved data retained");
+            close(fd2);
+
             NSString *restricted = [base stringByAppendingPathComponent:@"search-only/child"];
             check([fm createDirectoryAtPath:restricted withIntermediateDirectories:YES attributes:nil error:nil], @"create traversal fixture");
             NSString *parent = restricted.stringByDeletingLastPathComponent;
