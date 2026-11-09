@@ -140,7 +140,10 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 @property (nonatomic) BOOL isRoot;
 @end
 
-@implementation WQPlistEditorViewController
+@implementation WQPlistEditorViewController {
+    NSArray *_sortedKeyCache;
+    BOOL _keysDirty;
+}
 
 - (instancetype)initWithPath:(NSString *)path readOnly:(BOOL)readOnly
 {
@@ -233,10 +236,17 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (void)refresh
 {
-    if ([self.container isKindOfClass:NSDictionary.class])
-        self.keys = [[self.container allKeys] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
-    else
+    if ([self.container isKindOfClass:NSDictionary.class]) {
+        if (!_sortedKeyCache || _keysDirty) {
+            _sortedKeyCache = [[self.container allKeys] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+            _keysDirty = NO;
+        }
+        self.keys = _sortedKeyCache;
+    } else {
         self.keys = nil;
+        _sortedKeyCache = nil;
+        _keysDirty = NO;
+    }
     [self updateBar];
     [self.tableView reloadData];
 }
@@ -434,6 +444,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     // newer revision keeps the document dirty when that save finishes. The
     // guard above also protects stale UI callbacks from changing readonly or
     // frozen documents.
+    _keysDirty = YES;
     [self.doc.edit noteChange];
     [self refresh];
 }
@@ -476,7 +487,11 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"plist"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"plist"];
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     UIListContentConfiguration *c = [UIListContentConfiguration subtitleCellConfiguration];
     id value = [self valueAt:indexPath.row];
     WQPType t = wqp_type(value);
