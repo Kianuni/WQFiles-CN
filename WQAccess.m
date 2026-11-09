@@ -439,7 +439,9 @@ NSString *wq_backup_original_path(NSString *backupPath)
 {
     // Validate raw components before normalization, so traversal is never hidden.
     if (!WQAbsolutePathGrammar(backupPath)) return nil;
-    NSString *root = [WQCanonicalVarPath(wq_backup_root()) stringByAppendingString:@"/"];
+    NSString *rootPath = WQCanonicalVarPath(wq_backup_root());
+    if (!rootPath.length) return nil;
+    NSString *root = [rootPath stringByAppendingString:@"/"];
     NSString *p = WQCanonicalVarPath(backupPath);
     if (![p hasPrefix:root]) return nil;
     NSArray *parts = [[p substringFromIndex:root.length] componentsSeparatedByString:@"/"];
