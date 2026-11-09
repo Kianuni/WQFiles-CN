@@ -123,6 +123,12 @@ NSString *_Nullable wq_container_label(NSString *dir);
 
 // Backups of overwritten or deleted files, mirrored by original path.
 NSString *wq_backup_root(void);
+// App backups live in Documents/AppBackups, a sibling of file backups.
+NSString *wq_app_backup_root(void);
+// YES inside either backup store. Generic create/write/delete/rename must be
+// refused there so a backup cannot be recursively backed up or silently
+// turned into a different restore source.
+BOOL wq_is_backup_storage_path(NSString *path);
 NSString *_Nullable wq_backup_original_path(NSString *backupPath);
 
 NS_ASSUME_NONNULL_END

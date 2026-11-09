@@ -42,10 +42,9 @@
 static NSArray<NSString *> *kAppDataParts(void) { return @[@"Documents", @"Library", @"tmp"]; }
 static NSArray<NSString *> *kAppBackupParts(void) { return @[@"Documents", @"Library"]; }
 
-static NSString *wq_app_backup_root(NSString *bundleID)
+static NSString *wq_app_backup_root_for_bundle(NSString *bundleID)
 {
-    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    return [[docs stringByAppendingPathComponent:@"AppBackups"] stringByAppendingPathComponent:bundleID];
+    return [wq_app_backup_root() stringByAppendingPathComponent:bundleID];
 }
 
 // An app backup is AppBackups/<bundle id>/<date>/{Documents,Library} plus a
@@ -67,7 +66,7 @@ static NSDictionary *wq_backup_manifest(NSString *backup)
 
 static BOOL wq_backup_root_child(NSString *path, NSString *bundleID)
 {
-    NSString *root = [wq_app_backup_root(bundleID) stringByStandardizingPath];
+    NSString *root = [wq_app_backup_root_for_bundle(bundleID) stringByStandardizingPath];
     NSString *parent = [path.stringByDeletingLastPathComponent stringByStandardizingPath];
     NSString *name = path.lastPathComponent;
     return [parent isEqualToString:root] && name.length && ![name hasPrefix:@"."];
@@ -181,7 +180,7 @@ static BOOL wq_validate_backup(NSString *backup, NSString *bundleID, BOOL allowL
 // numeric collision sequence, never by the display name's text ordering.
 static NSArray<NSDictionary *> *wq_app_backups(NSString *bundleID)
 {
-    NSString *root = wq_app_backup_root(bundleID);
+    NSString *root = wq_app_backup_root_for_bundle(bundleID);
     NSArray *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:nil];
     NSMutableArray *out = [NSMutableArray new];
     for (NSString *name in names) {
@@ -279,7 +278,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
 {
     NSFileManager *fm = NSFileManager.defaultManager;
     if (!wq_validate_container(container, bundleID, expectedDevice, expectedInode, error)) return nil;
-    NSString *root = wq_app_backup_root(bundleID);
+    NSString *root = wq_app_backup_root_for_bundle(bundleID);
     [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
     for (NSString *name in [fm contentsOfDirectoryAtPath:root error:nil])   // leftovers of interrupted runs
         if ([name hasPrefix:kBackupStagingPrefix]) [fm removeItemAtPath:[root stringByAppendingPathComponent:name] error:nil];

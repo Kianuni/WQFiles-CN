@@ -270,6 +270,7 @@ static BOOL wq_is_denied(int err) { return err == EPERM || err == EACCES; }
 
 #ifdef WQ_ACCESS_TESTING
 static NSString *wq_test_backup_root;
+static NSString *wq_test_app_backup_root;
 static int64_t wq_test_volume_limit = -1;
 static void (^wq_test_mutation_hook)(NSString *stage, NSString *path);
 static void (^wq_test_tree_hook)(NSString *stage, NSString *path);
@@ -287,6 +288,25 @@ NSString *wq_backup_root(void)
 #endif
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     return [docs stringByAppendingPathComponent:@"Backups"];
+}
+
+NSString *wq_app_backup_root(void)
+{
+#ifdef WQ_ACCESS_TESTING
+    if (wq_test_app_backup_root) return wq_test_app_backup_root;
+#endif
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    return [docs stringByAppendingPathComponent:@"AppBackups"];
+}
+
+BOOL wq_is_backup_storage_path(NSString *path)
+{
+    NSString *original = WQCanonicalVarPath(path);
+    for (NSString *root in @[WQCanonicalVarPath(wq_backup_root()), WQCanonicalVarPath(wq_app_backup_root())]) {
+        if (!root.length) continue;
+        if ([original isEqualToString:root] || [original hasPrefix:[root stringByAppendingString:@"/"]]) return YES;
+    }
+    return NO;
 }
 
 static int wq_open(NSString *path, int flags, mode_t mode);
@@ -322,8 +342,7 @@ static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath)
 {
     NSString *original = WQCanonicalVarPath(path);
     NSString *root = WQCanonicalVarPath(wq_backup_root());
-    if (!WQAbsolutePathGrammar(original) || [original isEqualToString:root] ||
-        [original hasPrefix:[root stringByAppendingString:@"/"]]) {
+    if (!WQAbsolutePathGrammar(original) || wq_is_backup_storage_path(original)) {
         wq_log(@"backup: refusing invalid path or mutation of backup storage: %@", path);
         return NO;
     }
@@ -427,6 +446,10 @@ static BOOL wq_mutation_open(NSString *path, NSDictionary *expected, WQMutation 
 {
     *mutation = (WQMutation){ .fd = -1, .parent = -1 };
     if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path))) { if (errorText) *errorText = @"Invalid file path"; return NO; }
+    if (wq_is_backup_storage_path(path)) {
+        if (errorText) *errorText = @"Backup storage cannot be overwritten or deleted through the file browser.";
+        return NO;
+    }
     NSString *parent = path.stringByDeletingLastPathComponent;
     mutation->parent = WQOpenDirectoryNoLinksFlags(parent, O_SEARCH);
     if (mutation->parent < 0 && wq_is_denied(errno) && wq_grant(parent)) mutation->parent = WQOpenDirectoryNoLinksFlags(parent, O_SEARCH);
@@ -703,6 +726,10 @@ BOOL wq_write_from_file(NSString *path, NSString *source, NSString **errorText)
 
 BOOL wq_create_file_from(NSString *path, NSString *source, NSString **errorText)
 {
+    if (wq_is_backup_storage_path(path)) {
+        if (errorText) *errorText = @"Backup storage cannot be modified through the file browser.";
+        return NO;
+    }
     int in = WQOpenRegularAt(AT_FDCWD, source.fileSystemRepresentation, O_RDONLY, 0);
     if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
     int fd = wq_open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
@@ -721,6 +748,10 @@ BOOL wq_copy_to_local(NSString *path, NSString *dest, NSString **errorText)
 {
     if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path)) || !WQAbsolutePathGrammar(WQCanonicalVarPath(dest))) {
         if (errorText) *errorText = @"Invalid copy path";
+        return NO;
+    }
+    if (wq_is_backup_storage_path(dest)) {
+        if (errorText) *errorText = @"Backup storage cannot be modified through the file browser.";
         return NO;
     }
     int in = wq_open(path, O_RDONLY, 0);
@@ -846,6 +877,10 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
 
 BOOL wq_create_file(NSString *path, NSData *data, NSString **errorText)
 {
+    if (wq_is_backup_storage_path(path)) {
+        if (errorText) *errorText = @"Backup storage cannot be modified through the file browser.";
+        return NO;
+    }
     int fd = wq_open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) {
         if (errorText) *errorText = wq_errno(errno);
@@ -862,6 +897,10 @@ BOOL wq_create_file(NSString *path, NSData *data, NSString **errorText)
 
 BOOL wq_create_dir(NSString *path, NSString **errorText)
 {
+    if (wq_is_backup_storage_path(path)) {
+        if (errorText) *errorText = @"Backup storage cannot be modified through the file browser.";
+        return NO;
+    }
     int rc = mkdir(path.fileSystemRepresentation, 0755);
     if (rc != 0 && wq_is_denied(errno) && wq_grant(path.stringByDeletingLastPathComponent))
         rc = mkdir(path.fileSystemRepresentation, 0755);
@@ -873,6 +912,10 @@ BOOL wq_create_dir(NSString *path, NSString **errorText)
 
 BOOL wq_delete(NSString *path, NSString **errorText)
 {
+    if (wq_is_backup_storage_path(path)) {
+        if (errorText) *errorText = @"Backup storage cannot be overwritten or deleted through the file browser.";
+        return NO;
+    }
     struct stat st;
     if (!wq_stat(path, &st)) {
         if (errorText) *errorText = @"Not found";
@@ -924,6 +967,11 @@ BOOL wq_rename(NSString *path, NSString *newName, NSString **errorText)
     if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path)) || newName.length == 0 || [newName containsString:@"/"] ||
         [newName isEqualToString:@"."] || [newName isEqualToString:@".."] || [newName rangeOfString:@"\0"].location != NSNotFound) {
         if (errorText) *errorText = @"Invalid name";
+        return NO;
+    }
+    if (wq_is_backup_storage_path(path) ||
+        wq_is_backup_storage_path([path.stringByDeletingLastPathComponent stringByAppendingPathComponent:newName])) {
+        if (errorText) *errorText = @"Backup storage cannot be renamed through the file browser.";
         return NO;
     }
     NSString *parentPath = path.stringByDeletingLastPathComponent;

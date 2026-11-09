@@ -34,6 +34,7 @@ int main(void)
                           [@"WQAccessMutationTests-" stringByAppendingString:NSUUID.UUID.UUIDString]];
         check([fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil], @"create temp fixture");
         wq_test_backup_root = [base stringByAppendingPathComponent:@"Backups"];
+        wq_test_app_backup_root = [base stringByAppendingPathComponent:@"AppBackups"];
         @try {
             NSString *file = [base stringByAppendingPathComponent:@"file"];
             NSString *error = nil;
@@ -53,6 +54,24 @@ int main(void)
             check(!wq_write(backup, bytes(@"bad"), &error) && has(backup, @"original"), @"backup storage overwrite refused without recursive backup");
             check(!wq_delete(backup, &error) && has(backup, @"original"), @"backup storage delete refused");
             check(wq_delete(file, &error) && ![fm fileExistsAtPath:file] && backups().count == 3, @"regular delete retains durable backup");
+
+            check(wq_is_backup_storage_path(wq_test_backup_root), @"file backup root is protected");
+            check(wq_is_backup_storage_path(wq_test_app_backup_root), @"app backup root is protected");
+            NSString *appBackup = [[[wq_test_app_backup_root stringByAppendingPathComponent:@"com.example.app"]
+                                    stringByAppendingPathComponent:@"2026-11-09 21.00.00"]
+                                   stringByAppendingPathComponent:@"Documents/data"];
+            check([fm createDirectoryAtPath:appBackup.stringByDeletingLastPathComponent
+                  withIntermediateDirectories:YES attributes:nil error:nil], @"create app backup fixture");
+            put(appBackup, @"app backup bytes");
+            check(!wq_write(appBackup, bytes(@"bad"), &error) && has(appBackup, @"app backup bytes"), @"app backup overwrite refused");
+            check(!wq_delete(appBackup, &error) && has(appBackup, @"app backup bytes"), @"app backup delete refused");
+            check(!wq_rename(appBackup, @"renamed", &error) && has(appBackup, @"app backup bytes"), @"app backup rename refused");
+            check(!wq_create_file([wq_test_app_backup_root stringByAppendingPathComponent:@"new"], bytes(@"x"), &error), @"app backup create refused");
+            check(!wq_create_dir([wq_test_app_backup_root stringByAppendingPathComponent:@"newdir"], &error), @"app backup mkdir refused");
+            NSString *appSource = [base stringByAppendingPathComponent:@"app-source"];
+            put(appSource, @"source");
+            check(!wq_create_file_from([wq_test_app_backup_root stringByAppendingPathComponent:@"copy"], appSource, &error), @"app backup streamed create refused");
+            check(!wq_copy_to_local(appSource, [wq_test_app_backup_root stringByAppendingPathComponent:@"export"], &error), @"app backup local copy refused");
 
             // Deterministic version change after descriptor verification, before backup.
             put(file, @"original");
@@ -172,6 +191,7 @@ int main(void)
         } @finally {
             wq_test_mutation_hook = nil;
             wq_test_backup_root = nil;
+            wq_test_app_backup_root = nil;
             wq_test_volume_limit = -1;
             [fm removeItemAtPath:base error:nil];
         }
