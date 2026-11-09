@@ -262,10 +262,19 @@ static BOOL wq_copy_part_and_verify(NSString *src, NSString *dst, NSString **err
 static BOOL wq_purge_and_verify(NSString *dir, unsigned long long *freed, NSString **error)
 {
     if (!wq_purge_contents(dir, freed)) return NO;
-    BOOL exists = NO;
-    NSString *signature = WQAppsSupportTreeSignature(dir, NO, &exists, error);
-    if (!signature) return NO;
-    if (exists && signature.length) {
+    struct stat st;
+    if (!wq_stat(dir, &st)) return YES;   // a missing part is an acceptable empty result
+    if (!S_ISDIR(st.st_mode)) {
+        if (error) *error = [NSString stringWithFormat:@"%@ is not a directory", dir.lastPathComponent];
+        return NO;
+    }
+    NSError *listError = nil;
+    NSArray *remaining = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:&listError];
+    if (!remaining) {
+        if (error) *error = listError.localizedDescription ?: [NSString stringWithFormat:@"Cannot read %@", dir.lastPathComponent];
+        return NO;
+    }
+    if (remaining.count) {
         if (error) *error = [NSString stringWithFormat:@"Some items remain in %@; keep the app closed and try again", dir.lastPathComponent];
         return NO;
     }

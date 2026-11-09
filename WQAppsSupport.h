@@ -1,8 +1,10 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <CommonCrypto/CommonDigest.h>
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -79,8 +81,25 @@ static inline BOOL WQAppsSupportManifestFields(NSDictionary *manifest, NSString 
     return YES;
 }
 
+static inline void WQAppsSupportHashU64(CC_SHA256_CTX *ctx, uint64_t value)
+{
+    uint8_t bytes[8];
+    for (NSUInteger i = 0; i < 8; i++) bytes[i] = (uint8_t)(value >> (56 - 8 * i));
+    CC_SHA256_Update(ctx, bytes, (CC_LONG)sizeof(bytes));
+}
+
+static inline void WQAppsSupportHashBlob(CC_SHA256_CTX *ctx, const void *bytes, NSUInteger length)
+{
+    WQAppsSupportHashU64(ctx, (uint64_t)length);
+    if (length) CC_SHA256_Update(ctx, bytes, (CC_LONG)length);
+}
+
+// Deterministic SHA-256 over length-prefixed tree metadata. `includeIdentity`
+// adds inode/mtime/ctime for source-stability checks; the shape variant omits
+// them and is suitable for comparing a source with its copy. A digest keeps
+// memory bounded and makes filenames containing delimiters unambiguous.
 static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeIdentity,
-                                            BOOL *exists, NSString **errorOut)
+                                                   BOOL *exists, NSString **errorOut)
 {
     struct stat rootStat;
     if (lstat(path.fileSystemRepresentation, &rootStat) != 0) {
@@ -102,9 +121,14 @@ static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeI
     }
     if (exists) *exists = YES;
 
-    NSMutableArray<NSString *> *entries = [NSMutableArray new];
-    NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:path];
-    for (NSString *relative in enumerator) {
+    NSMutableArray<NSString *> *relativePaths = [NSMutableArray new];
+    for (NSString *relative in [NSFileManager.defaultManager enumeratorAtPath:path])
+        [relativePaths addObject:relative];
+    [relativePaths sortUsingSelector:@selector(compare:)];
+
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
+    for (NSString *relative in relativePaths) {
         NSString *item = [path stringByAppendingPathComponent:relative];
         struct stat itemStat;
         if (lstat(item.fileSystemRepresentation, &itemStat) != 0) {
@@ -112,19 +136,26 @@ static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeI
             return nil;
         }
         unsigned type = (unsigned)(itemStat.st_mode & S_IFMT);
-        NSString *name = [NSString stringWithFormat:@"%lu:%@", (unsigned long)relative.length, relative];
-        NSString *entry = nil;
+        const char *name = relative.UTF8String;
+        NSUInteger nameLength = name ? strlen(name) : 0;
+        if (!name) {
+            if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot encode %@", relative];
+            return nil;
+        }
+        uint8_t tag = includeIdentity ? 'I' : 'S';
+        CC_SHA256_Update(&ctx, &tag, 1);
+        WQAppsSupportHashBlob(&ctx, name, nameLength);
+        WQAppsSupportHashU64(&ctx, type);
+        WQAppsSupportHashU64(&ctx, (uint64_t)(itemStat.st_mode & 07777));
         if (includeIdentity) {
-            entry = [NSString stringWithFormat:@"I|%@|%u|%llu|%lld.%09ld|%lld.%09ld|%lld",
-                     name, type, (unsigned long long)itemStat.st_ino,
-                     (long long)itemStat.st_mtimespec.tv_sec, itemStat.st_mtimespec.tv_nsec,
-                     (long long)itemStat.st_ctimespec.tv_sec, itemStat.st_ctimespec.tv_nsec,
-                     (long long)itemStat.st_size];
+            WQAppsSupportHashU64(&ctx, (uint64_t)itemStat.st_ino);
+            WQAppsSupportHashU64(&ctx, (uint64_t)itemStat.st_size);
+            WQAppsSupportHashU64(&ctx, (uint64_t)itemStat.st_mtimespec.tv_sec);
+            WQAppsSupportHashU64(&ctx, (uint64_t)itemStat.st_mtimespec.tv_nsec);
+            WQAppsSupportHashU64(&ctx, (uint64_t)itemStat.st_ctimespec.tv_sec);
+            WQAppsSupportHashU64(&ctx, (uint64_t)itemStat.st_ctimespec.tv_nsec);
         } else if (type == S_IFREG) {
-            entry = [NSString stringWithFormat:@"R|%@|%lld|%u", name,
-                     (long long)itemStat.st_size, (unsigned)(itemStat.st_mode & 07777)];
-        } else if (type == S_IFDIR) {
-            entry = [NSString stringWithFormat:@"D|%@|%u", name, (unsigned)(itemStat.st_mode & 07777)];
+            WQAppsSupportHashU64(&ctx, (uint64_t)itemStat.st_size);
         } else if (type == S_IFLNK) {
             char target[PATH_MAX];
             ssize_t length = readlink(item.fileSystemRepresentation, target, sizeof(target) - 1);
@@ -132,21 +163,14 @@ static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeI
                 if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect link %@", relative];
                 return nil;
             }
-            target[length] = 0;
-            NSString *value = [NSString stringWithUTF8String:target];
-            if (!value) {
-                if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot decode link %@", relative];
-                return nil;
-            }
-            entry = [NSString stringWithFormat:@"L|%lu:%@|%lu:%@",
-                     (unsigned long)relative.length, relative, (unsigned long)value.length, value];
-        } else {
-            entry = [NSString stringWithFormat:@"O|%@|%u", name, type];
+            WQAppsSupportHashBlob(&ctx, target, (NSUInteger)length);
         }
-        [entries addObject:entry];
     }
-    [entries sortUsingSelector:@selector(compare:)];
-    return [entries componentsJoinedByString:@"\n"];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &ctx);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [hex appendFormat:@"%02x", digest[i]];
+    return hex;
 }
 
 static inline NSUInteger WQAppsSupportBackupSequence(NSString *name)

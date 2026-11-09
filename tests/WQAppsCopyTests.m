@@ -58,7 +58,7 @@ int main(void)
             WQCheck([fm createDirectoryAtPath:emptySrc withIntermediateDirectories:YES attributes:nil error:nil]);
             WQCheck(wq_copy_contents(emptySrc, emptyDst, &error));
             NSString *emptyShape = WQAppsSupportTreeSignature(emptyDst, NO, &exists, &error);
-            WQCheck(emptyShape && emptyShape.length == 0 && exists);
+            WQCheck(emptyShape && ![emptyShape isEqualToString:@"<missing>"] && exists);
 
             // Mutating the source after the copy changes the source shape.
             Put([src stringByAppendingPathComponent:@"file"], @"different bytes!");
