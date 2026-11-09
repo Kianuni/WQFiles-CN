@@ -98,6 +98,7 @@ class StagedBuildTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
         environment["FAKE_SDK"] = str(fake_sdk)
+        environment["WQ_SKIP_PREFLIGHT"] = "1"
         return environment
 
     def test_default_output_stays_in_project(self):

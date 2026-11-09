@@ -9,6 +9,13 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 MINIMUM_IOS_VERSION=27.0
 FINAL_IPA=${WQFILES_FINAL_IPA:-WQFiles.ipa}
+
+# Publish only after the host regression suite passes. The packaged artifact
+# still needs device validation, but this prevents a known-broken source tree
+# from replacing the release IPA.
+if [[ "${WQ_SKIP_PREFLIGHT:-0}" != 1 && -x "$ROOT/tests/run_all_tests.sh" ]]; then
+    "$ROOT/tests/run_all_tests.sh"
+fi
 if [[ "$FINAL_IPA" != /* ]]; then
     FINAL_IPA="$ROOT/$FINAL_IPA"
 fi
