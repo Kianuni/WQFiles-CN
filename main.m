@@ -64,6 +64,45 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 
 typedef NS_ENUM(NSInteger, WQViewKind) { WQViewText, WQViewPlist, WQViewImage, WQViewHex };
 
+static const NSUInteger kViewLimit = 4 * 1024 * 1024;
+static const NSUInteger kHexLimit = 64 * 1024;
+
+// Parsing and image creation happen on the I/O queue; the main thread only
+// installs the prepared display.
+@interface WQFileDisplay : NSObject
+@property (nonatomic) BOOL truncated;
+@property (nonatomic, strong) NSString *plistText;
+@property (nonatomic) NSPropertyListFormat plistFormat;
+@property (nonatomic, strong) UIImage *image;
+@property (nonatomic, strong) NSString *text;
+@property (nonatomic, strong) NSString *hexText;
+@end
+@implementation WQFileDisplay
+@end
+
+static NSString *wq_file_hex_dump(NSData *data, BOOL truncated)
+{
+    NSUInteger len = MIN(data.length, kHexLimit);
+    const uint8_t *b = data.bytes;
+    NSMutableString *out = [NSMutableString stringWithCapacity:len * 4];
+    for (NSUInteger off = 0; off < len; off += 16) {
+        [out appendFormat:@"%08lx  ", (unsigned long)off];
+        NSMutableString *ascii = [NSMutableString new];
+        for (NSUInteger i = 0; i < 16; i++) {
+            if (off + i < len) {
+                uint8_t c = b[off + i];
+                [out appendFormat:@"%02x ", c];
+                [ascii appendFormat:@"%c", (c >= 0x20 && c < 0x7f) ? c : '.'];
+            } else {
+                [out appendString:@"   "];
+            }
+        }
+        [out appendFormat:@" %@\n", ascii];
+    }
+    if (data.length > len || truncated) [out appendString:@"\n… (only the beginning is shown)\n"];
+    return out;
+}
+
 @interface WQFileViewController : UIViewController <UITextViewDelegate, WQUnsavedEditing>
 @property (nonatomic) BOOL readOnly;
 - (instancetype)initWithPath:(NSString *)path;
@@ -81,8 +120,6 @@ typedef NS_ENUM(NSInteger, WQViewKind) { WQViewText, WQViewPlist, WQViewImage, W
     NSDictionary<NSString *, NSNumber *> *_version;
 }
 
-static const NSUInteger kViewLimit = 4 * 1024 * 1024;
-static const NSUInteger kHexLimit = 64 * 1024;
 
 - (instancetype)initWithPath:(NSString *)path
 {
@@ -154,9 +191,37 @@ static const NSUInteger kHexLimit = 64 * 1024;
             error = version ? @"The file changed while it was being read. Open it again."
                             : @"Could not establish a stable file version. Open it again.";
         }
+        WQFileDisplay *display = nil;
+        if (data) {
+            display = [WQFileDisplay new];
+            display.truncated = data.length > kViewLimit;
+            NSData *view = display.truncated ? [data subdataWithRange:NSMakeRange(0, kViewLimit)] : data;
+            if (!display.truncated) {
+                NSPropertyListFormat format = 0;
+                id plist = [NSPropertyListSerialization propertyListWithData:view options:0 format:&format error:nil];
+                if (plist) {
+                    NSData *xml = [NSPropertyListSerialization dataWithPropertyList:plist
+                                                                            format:NSPropertyListXMLFormat_v1_0
+                                                                           options:0 error:nil];
+                    NSString *text = xml ? [[NSString alloc] initWithData:xml encoding:NSUTF8StringEncoding] : nil;
+                    if (text) {
+                        display.plistFormat = format;
+                        display.plistText = text;
+                    }
+                }
+            }
+            if (!display.plistText) {
+                display.image = [UIImage imageWithData:view];
+                if (!display.image) {
+                    NSString *text = [[NSString alloc] initWithData:view encoding:NSUTF8StringEncoding];
+                    if (text && ![text containsString:@"\0"]) display.text = text;
+                    else display.hexText = wq_file_hex_dump(view, display.truncated);
+                }
+            }
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_version = version;
-            if (!data) {
+            if (!display) {
                 NSString *hint = wq_permission_hint(path, NO);
                 self->_textView.text = [NSString stringWithFormat:@"Cannot read this file.\n\n%@", hint ?: error];
                 return;
@@ -167,78 +232,42 @@ static const NSUInteger kHexLimit = 64 * 1024;
                 : @"";
             self.navigationItem.prompt = info.length ? info : nil;
             if (wq_permission_hint(path, YES)) self->_readOnly = YES;   // only the owner may write it
-            [self show:data];
+            [self showDisplay:display];
         });
     });
 }
 
-- (void)show:(NSData *)all
+- (void)showDisplay:(WQFileDisplay *)display
 {
-    _truncated = all.length > kViewLimit;
-    NSData *data = _truncated ? [all subdataWithRange:NSMakeRange(0, kViewLimit)] : all;
-
-    if (!_truncated) {
-        NSPropertyListFormat format = 0;
-        id plist = [NSPropertyListSerialization propertyListWithData:data options:0 format:&format error:nil];
-        if (plist) {
-            NSData *xml = [NSPropertyListSerialization dataWithPropertyList:plist format:NSPropertyListXMLFormat_v1_0
-                                                                    options:0 error:nil];
-            NSString *text = xml ? [[NSString alloc] initWithData:xml encoding:NSUTF8StringEncoding] : nil;
-            if (text) {
-                _kind = WQViewPlist;
-                _plistFormat = format;
-                _textView.text = text;
-                if (!WQPlistFormatIsWritable(format)) {
-                    _readOnly = YES;
-                    NSString *prompt = self.navigationItem.prompt;
-                    NSString *reason = [NSString stringWithFormat:@"%@ · read only", WQPlistFormatName(format)];
-                    self.navigationItem.prompt = prompt.length ? [prompt stringByAppendingFormat:@" · %@", reason] : reason;
-                }
-                if (!_readOnly) [self enableEditing];
-                return;
-            }
+    _truncated = display.truncated;
+    if (display.plistText) {
+        _kind = WQViewPlist;
+        _plistFormat = display.plistFormat;
+        _textView.text = display.plistText;
+        if (!WQPlistFormatIsWritable(display.plistFormat)) {
+            _readOnly = YES;
+            NSString *prompt = self.navigationItem.prompt;
+            NSString *reason = [NSString stringWithFormat:@"%@ · read only", WQPlistFormatName(display.plistFormat)];
+            self.navigationItem.prompt = prompt.length ? [prompt stringByAppendingFormat:@" · %@", reason] : reason;
         }
+        if (!_readOnly) [self enableEditing];
+        return;
     }
-    UIImage *image = [UIImage imageWithData:data];
-    if (image) {
+    if (display.image) {
         _kind = WQViewImage;
-        _imageView.image = image;
+        _imageView.image = display.image;
         _imageView.hidden = NO;
         _textView.hidden = YES;
         return;
     }
-    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (text && ![text containsString:@"\0"]) {
+    if (display.text) {
         _kind = WQViewText;
-        _textView.text = text;
+        _textView.text = display.text;
         if (!_truncated && !_readOnly) [self enableEditing];
         return;
     }
     _kind = WQViewHex;
-    _textView.text = [self hexDump:data];
-}
-
-- (NSString *)hexDump:(NSData *)data
-{
-    NSUInteger len = MIN(data.length, kHexLimit);
-    const uint8_t *b = data.bytes;
-    NSMutableString *out = [NSMutableString stringWithCapacity:len * 4];
-    for (NSUInteger off = 0; off < len; off += 16) {
-        [out appendFormat:@"%08lx  ", (unsigned long)off];
-        NSMutableString *ascii = [NSMutableString new];
-        for (NSUInteger i = 0; i < 16; i++) {
-            if (off + i < len) {
-                uint8_t c = b[off + i];
-                [out appendFormat:@"%02x ", c];
-                [ascii appendFormat:@"%c", (c >= 0x20 && c < 0x7f) ? c : '.'];
-            } else {
-                [out appendString:@"   "];
-            }
-        }
-        [out appendFormat:@" %@\n", ascii];
-    }
-    if (data.length > len || _truncated) [out appendString:@"\n… (only the beginning is shown)\n"];
-    return out;
+    _textView.text = display.hexText ?: @"";
 }
 
 - (void)updateEditButton
