@@ -24,9 +24,9 @@
           "version": "0.6",
           "buildVersion": "6",
           "date": "2026-11-09",
-          "size": 272155,
+          "size": 274646,
           "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.6/WQFiles.ipa",
-          "localizedDescription": "Manage and delete backups, stop a cache clean, cancel ZIP exports; checked backups and restores, safer file changes; plist and hex fixes; now requires iOS 27.",
+          "localizedDescription": "Cooler, faster scans (one shared pass, fewer cores); manage and delete backups, stop a cache clean, cancel ZIP exports; checked backups and restores; signing help in the README. Requires iOS 27.",
           "minOSVersion": "27.0"
         },
         {
