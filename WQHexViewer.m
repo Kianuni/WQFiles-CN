@@ -44,6 +44,8 @@ static NSData *wqh_parse_hex(NSString *text)
     NSCache<NSNumber *, NSData *> *_pages;
     NSMutableSet<NSNumber *> *_loading;
     NSMutableDictionary<NSNumber *, NSNumber *> *_edits;   // offset -> new byte
+    NSUInteger _revision;
+    BOOL _saving;
     unsigned long long _matchOffset;
     NSUInteger _matchLength;
     NSString *_status;
@@ -125,17 +127,21 @@ static NSData *wqh_parse_hex(NSString *text)
 - (void)updateBar
 {
     NSString *size = [NSByteCountFormatter stringFromByteCount:(long long)_size countStyle:NSByteCountFormatterCountStyleFile];
-    NSString *prompt = _status ?: [NSString stringWithFormat:@"%@ · %llu bytes%@", size, _size,
-                                   _edits.count ? [NSString stringWithFormat:@" · %lu changed", (unsigned long)_edits.count] : @""];
+    NSString *prompt = _status ?: [NSString stringWithFormat:@"%@ · %llu bytes%@%@", size, _size,
+                                   _edits.count ? [NSString stringWithFormat:@" · %lu changed", (unsigned long)_edits.count] : @"",
+                                   _saving ? @" · Saving…" : @""];
     self.navigationItem.prompt = prompt;
     NSMutableArray *items = [NSMutableArray array];
     if (!_readOnly) {
         UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithTitle:@"Save" style:UIBarButtonItemStyleDone
                                                                 target:self action:@selector(save)];
-        save.enabled = _edits.count > 0;
+        save.enabled = _edits.count > 0 && !_saving;
         [items addObject:save];
     }
     __weak typeof(self) weakSelf = self;
+    UIAction *discard = [UIAction actionWithTitle:@"Discard Changes" image:[UIImage systemImageNamed:@"arrow.uturn.backward"] identifier:nil
+                                      handler:^(UIAction *a) { [weakSelf discard]; }];
+    if (_saving) discard.attributes = UIMenuElementAttributesDisabled;
     UIMenu *menu = [UIMenu menuWithChildren:@[
         [UIAction actionWithTitle:@"Go to Offset…" image:[UIImage systemImageNamed:@"arrow.right.to.line"] identifier:nil
                           handler:^(UIAction *a) { [weakSelf goToOffset]; }],
@@ -143,8 +149,7 @@ static NSData *wqh_parse_hex(NSString *text)
                           handler:^(UIAction *a) { [weakSelf promptFindHex:YES]; }],
         [UIAction actionWithTitle:@"Find Text…" image:[UIImage systemImageNamed:@"text.magnifyingglass"] identifier:nil
                           handler:^(UIAction *a) { [weakSelf promptFindHex:NO]; }],
-        [UIAction actionWithTitle:@"Discard Changes" image:[UIImage systemImageNamed:@"arrow.uturn.backward"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf discard]; }],
+        discard,
     ]];
     [items addObject:[[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:menu]];
     self.navigationItem.rightBarButtonItems = items;
@@ -244,7 +249,7 @@ static NSData *wqh_parse_hex(NSString *text)
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (_readOnly) return;
+    if (_readOnly || _saving) return;
     unsigned long long start = (unsigned long long)indexPath.row * _perRow;
     NSUInteger count = (NSUInteger)MIN((unsigned long long)_perRow, _size - start);
     NSMutableString *current = [NSMutableString new];
@@ -275,6 +280,7 @@ static NSData *wqh_parse_hex(NSString *text)
             if ([self originalByteAt:off] == nb[i]) [self->_edits removeObjectForKey:@(off)];
             else self->_edits[@(off)] = @(nb[i]);
         }
+        self->_revision++;
         [self updateBar];
         [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
     }]];
@@ -301,9 +307,16 @@ static NSData *wqh_parse_hex(NSString *text)
     return runs;
 }
 
+- (BOOL)blockWhileSaving
+{
+    if (!_saving) return NO;
+    wqh_alert(self, @"Save in progress", @"Wait for the save to finish before leaving or changing these edits.");
+    return YES;
+}
+
 - (void)save
 {
-    if (!_edits.count) return;
+    if (!_edits.count || [self blockWhileSaving]) return;
     NSDictionary *runs = [self runs];
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Save changes?"
         message:[NSString stringWithFormat:@"%lu bytes in %@ are overwritten in place. The current file is backed up first.",
@@ -311,13 +324,21 @@ static NSData *wqh_parse_hex(NSString *text)
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+        NSUInteger savedRevision = self->_revision;
+        self->_saving = YES;
+        [self updateBar];
         NSString *path = self->_path;
         dispatch_async(self->_queue, ^{
             NSString *error = nil;
             BOOL ok = wq_patch(path, runs, &error);
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!ok) { wqh_alert(self, @"Save failed", wq_permission_hint(path, YES) ?: error ?: @"Unknown error"); return; }
-                [self->_edits removeAllObjects];
+                self->_saving = NO;
+                if (!ok) {
+                    [self updateBar];
+                    wqh_alert(self, @"Save failed", wq_permission_hint(path, YES) ?: error ?: @"Unknown error");
+                    return;
+                }
+                if (self->_revision == savedRevision) [self->_edits removeAllObjects];
                 [self->_pages removeAllObjects];
                 [self updateBar];
                 [self.tableView reloadData];
@@ -329,7 +350,9 @@ static NSData *wqh_parse_hex(NSString *text)
 
 - (void)discard
 {
+    if ([self blockWhileSaving]) return;
     [_edits removeAllObjects];
+    _revision++;
     [self updateBar];
     [self.tableView reloadData];
 }
@@ -337,12 +360,14 @@ static NSData *wqh_parse_hex(NSString *text)
 // Home button: ask before throwing away unsaved changes.
 - (void)confirmLeaveThen:(void (^)(void))proceed
 {
+    if ([self blockWhileSaving]) return;
     if (!_edits.count) { proceed(); return; }
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your byte changes have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
         [self->_edits removeAllObjects];
+        self->_revision++;
         proceed();
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -350,15 +375,9 @@ static NSData *wqh_parse_hex(NSString *text)
 
 - (void)leave
 {
-    if (!_edits.count) { [self.navigationController popViewControllerAnimated:YES]; return; }
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Discard changes?"
-        message:@"Your byte changes have not been saved." preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
-        [self->_edits removeAllObjects];
+    [self confirmLeaveThen:^{
         [self.navigationController popViewControllerAnimated:YES];
-    }]];
-    [self presentViewController:a animated:YES completion:nil];
+    }];
 }
 
 #pragma mark Navigation and search
