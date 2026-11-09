@@ -145,6 +145,21 @@ static NSString *wq_find_ls_store(BOOL *searched)
     return bestPath;
 }
 
+// Record layouts by release. Offsets are from the record body (after the
+// 8-byte header). iOS 26 records are 0x14 bytes shorter, with the container
+// path and the fields after it 4 bytes earlier than on 27.0.
+typedef struct {
+    const char *label;
+    uint32_t bundleSize, bundleID, container, name, displayName;
+    uint32_t pluginSize, pluginBundleID, pluginContainer;
+} WQLSLayout;
+static const WQLSLayout kWQLSLayouts[] = {
+    { "27.0", 0x250, 0x0c, 0x68, 0x6c, 0x74, 0x118, 0x00, 0x54 },
+    { "26",   0x23c, 0x0c, 0x64, 0x68, 0x70, 0x104, 0x00, 0x50 },
+};
+static const size_t kWQLSLayoutCount = sizeof(kWQLSLayouts) / sizeof(kWQLSLayouts[0]);
+static const size_t kWQLSMaxRecordSize = 0x250;
+
 static uint32_t wq_rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
 static NSString *wq_cs_string(const uint8_t *b, size_t n, size_t o)
@@ -245,8 +260,8 @@ static int wq_u32_cmp(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-static void wq_ls_log_summary(const uint8_t *b, size_t n, NSUInteger bundleRecords, NSUInteger pluginRecords,
-                              NSUInteger names, NSUInteger mapped)
+static void wq_ls_log_summary(const uint8_t *b, size_t n, NSString *layout, NSUInteger bundleRecords,
+                              NSUInteger pluginRecords, NSUInteger names, NSUInteger mapped)
 {
     NSMutableData *refData = [NSMutableData new];
     static const char needle[] = "/var/mobile/Containers/Data/";
@@ -269,8 +284,8 @@ static void wq_ls_log_summary(const uint8_t *b, size_t n, NSUInteger bundleRecor
     NSUInteger pathCount = refData.length / sizeof(uint32_t);
     uint32_t *refs = refData.mutableBytes;
     if (pathCount) qsort(refs, pathCount, sizeof(uint32_t), wq_u32_cmp);
-    wq_log(@"names: store %.1f MB, %lu bundle and %lu plugin records, %lu names, %lu of %lu container paths mapped",
-           n / 1048576.0, (unsigned long)bundleRecords, (unsigned long)pluginRecords, (unsigned long)names,
+    wq_log(@"names: store %.1f MB, layout %@: %lu bundle and %lu plugin records, %lu names, %lu of %lu container paths mapped",
+           n / 1048576.0, layout, (unsigned long)bundleRecords, (unsigned long)pluginRecords, (unsigned long)names,
            (unsigned long)mapped, (unsigned long)pathCount);
     if (!pathCount || mapped * 10 >= pathCount * 9) return;
 
@@ -315,13 +330,17 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
                                   options:0 range:NSMakeRange(0, n)];
     size_t heap = heapRange.location == NSNotFound ? 0 : heapRange.location;
 
-    // Pass 1: Bundle records, and which string ids they need.
+    // Pass 1: Bundle and plug-in records of every known layout, and which
+    // string ids they need. The layout that maps the most containers wins.
     const uint32_t kIDs = kWQLSMaxStringID;
     size_t bitsetBytes = kIDs / 8;
     uint8_t *need = calloc(bitsetBytes, 1), *inHeap = calloc(bitsetBytes, 1);
-    NSMutableData *recs = [NSMutableData dataWithCapacity:kWQLSMaxBundleRecords * 4 * sizeof(uint32_t)];
-    NSMutableData *plugins = [NSMutableData new];   // pairs: bundle id ref, container path ref
-    if (!need || !inHeap || !recs) {
+    NSMutableArray<NSMutableData *> *layoutRecs = [NSMutableArray new], *layoutPlugins = [NSMutableArray new];
+    for (size_t l = 0; l < kWQLSLayoutCount; l++) {
+        [layoutRecs addObject:[NSMutableData new]];
+        [layoutPlugins addObject:[NSMutableData new]];   // pairs: bundle id ref, container path ref
+    }
+    if (!need || !inHeap) {
         free(need);
         free(inHeap);
         wq_log(@"names: LaunchServices parser allocation failed");
@@ -329,30 +348,33 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
     }
 
     BOOL tooManyRecords = NO;
-    for (size_t o = 0; o <= n - 8 - 0x250; o += 4) {
+    for (size_t o = 0; o + 8 + kWQLSMaxRecordSize <= n && !tooManyRecords; o += 4) {
         uint32_t size = wq_rd32(b + o + 4);
-        if (size == 0x118) {
-            const uint8_t *u = b + o + 8;
-            uint32_t p[2] = { wq_rd32(u + 0x00), wq_rd32(u + 0x54) };
-            if (p[0] && !(p[0] & 3) && (p[0] >> 2) < kIDs && p[1] && !(p[1] & 3) && (p[1] >> 2) < kIDs &&
-                plugins.length / sizeof(p) < kWQLSMaxBundleRecords) {
-                [plugins appendBytes:p length:sizeof(p)];
-                for (int i = 0; i < 2; i++) need[(p[i] >> 2) / 8] |= 1 << ((p[i] >> 2) % 8);
-            }
-            continue;
-        }
-        if (size != 0x250) continue;
-        if (recs.length / (4 * sizeof(uint32_t)) >= kWQLSMaxBundleRecords) {
-            tooManyRecords = YES;
-            break;
-        }
         const uint8_t *u = b + o + 8;
-        uint32_t r[4] = { wq_rd32(u + 0x0c), wq_rd32(u + 0x6c), wq_rd32(u + 0x74), wq_rd32(u + 0x68) };
-        if (!r[0] || (r[0] & 3) || (r[0] >> 2) >= kIDs) continue;
-        [recs appendBytes:r length:sizeof(r)];
-        for (int i = 0; i < 4; i++) {
-            if (r[i] && !(r[i] & 3) && (r[i] >> 2) < kIDs)
-                need[(r[i] >> 2) / 8] |= 1 << ((r[i] >> 2) % 8);
+        for (size_t l = 0; l < kWQLSLayoutCount; l++) {
+            const WQLSLayout *L = &kWQLSLayouts[l];
+            if (size == L->pluginSize) {
+                NSMutableData *plugins = layoutPlugins[l];
+                uint32_t p[2] = { wq_rd32(u + L->pluginBundleID), wq_rd32(u + L->pluginContainer) };
+                if (p[0] && !(p[0] & 3) && (p[0] >> 2) < kIDs && p[1] && !(p[1] & 3) && (p[1] >> 2) < kIDs &&
+                    plugins.length / sizeof(p) < kWQLSMaxBundleRecords) {
+                    [plugins appendBytes:p length:sizeof(p)];
+                    for (int i = 0; i < 2; i++) need[(p[i] >> 2) / 8] |= 1 << ((p[i] >> 2) % 8);
+                }
+            }
+            if (size != L->bundleSize) continue;
+            NSMutableData *recs = layoutRecs[l];
+            if (recs.length / (4 * sizeof(uint32_t)) >= kWQLSMaxBundleRecords) {
+                tooManyRecords = YES;
+                break;
+            }
+            uint32_t r[4] = { wq_rd32(u + L->bundleID), wq_rd32(u + L->name), wq_rd32(u + L->displayName), wq_rd32(u + L->container) };
+            if (!r[0] || (r[0] & 3) || (r[0] >> 2) >= kIDs) continue;
+            [recs appendBytes:r length:sizeof(r)];
+            for (int i = 0; i < 4; i++) {
+                if (r[i] && !(r[i] & 3) && (r[i] >> 2) < kIDs)
+                    need[(r[i] >> 2) / 8] |= 1 << ((r[i] >> 2) % 8);
+            }
         }
     }
     if (tooManyRecords) {
@@ -388,41 +410,60 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         wq_log(@"names: LaunchServices store exceeds string limit");
         return NO;
     }
-    if (!recs.length) {
-        wq_ls_log_summary(b, n, 0, plugins.length / (2 * sizeof(uint32_t)), 0, 0);
+    NSUInteger anyRecords = 0, anyPlugins = 0;
+    for (size_t l = 0; l < kWQLSLayoutCount; l++) {
+        anyRecords += layoutRecs[l].length / (4 * sizeof(uint32_t));
+        anyPlugins += layoutPlugins[l].length / (2 * sizeof(uint32_t));
+    }
+    if (!anyRecords) {
+        wq_ls_log_summary(b, n, @"none", 0, anyPlugins, 0, 0);
         wq_log(@"names: LaunchServices store contains no bundle records");
         return NO;
     }
 
-    NSMutableDictionary *display = [NSMutableDictionary new], *bundleName = [NSMutableDictionary new];
-    NSMutableDictionary<NSString *, id> *containers = [NSMutableDictionary new];
-    // A path claimed by two different bundle ids is left out rather than guessed.
-    void (^claim)(NSString *, NSString *) = ^(NSString *path, NSString *bid) {
-        if (!wq_is_data_container_path(path) || !wq_looks_like_bundle_id(bid)) return;
-        id known = containers[path];
-        if (!known) containers[path] = bid;
-        else if (![known isEqual:bid]) containers[path] = NSNull.null;
-    };
-    const uint32_t *pr = plugins.bytes;
-    for (NSUInteger i = 0; i < plugins.length / sizeof(uint32_t); i += 2)
-        claim(strings[@(pr[i + 1] >> 2)], strings[@(pr[i] >> 2)]);
-    const uint32_t *r = recs.bytes;
-    for (NSUInteger i = 0; i < recs.length / sizeof(uint32_t); i += 4) {
-        NSString *bid = strings[@(r[i] >> 2)];
-        if (!wq_looks_like_bundle_id(bid)) continue;
-        if (r[i + 3] && !(r[i + 3] & 3)) claim(strings[@(r[i + 3] >> 2)], bid);
-        NSString *nm = (r[i + 1] & 3) ? nil : strings[@(r[i + 1] >> 2)];
-        NSString *dn = (r[i + 2] & 3) ? nil : strings[@(r[i + 2] >> 2)];
-        NSString *safeDisplay = wq_safe_name(dn);
-        NSString *safeBundleName = wq_safe_name(nm);
-        if (safeDisplay && !display[bid]) display[bid] = safeDisplay;
-        if (safeBundleName && !bundleName[bid]) bundleName[bid] = safeBundleName;
+    NSDictionary *display = nil, *bundleName = nil, *containers = nil;
+    size_t chosen = 0;
+    for (size_t l = 0; l < kWQLSLayoutCount; l++) {
+        NSMutableDictionary *layoutDisplay = [NSMutableDictionary new], *layoutBundleName = [NSMutableDictionary new];
+        NSMutableDictionary<NSString *, id> *layoutContainers = [NSMutableDictionary new];
+        // A path claimed by two different bundle ids is left out rather than guessed.
+        // Plug-in records only claim extension containers and bundle records
+        // only app containers, so a record type that happens to share a size
+        // can't knock out the other table's paths.
+        void (^claim)(NSString *, NSString *, NSString *) = ^(NSString *path, NSString *bid, NSString *kind) {
+            if (!wq_is_data_container_path(path) || !wq_looks_like_bundle_id(bid) || ![path containsString:kind]) return;
+            id known = layoutContainers[path];
+            if (!known) layoutContainers[path] = bid;
+            else if (![known isEqual:bid]) layoutContainers[path] = NSNull.null;
+        };
+        NSData *plugins = layoutPlugins[l], *recs = layoutRecs[l];
+        const uint32_t *pr = plugins.bytes;
+        for (NSUInteger i = 0; i < plugins.length / sizeof(uint32_t); i += 2)
+            claim(strings[@(pr[i + 1] >> 2)], strings[@(pr[i] >> 2)], @"/Data/PluginKitPlugin/");
+        const uint32_t *r = recs.bytes;
+        for (NSUInteger i = 0; i < recs.length / sizeof(uint32_t); i += 4) {
+            NSString *bid = strings[@(r[i] >> 2)];
+            if (!wq_looks_like_bundle_id(bid)) continue;
+            if (r[i + 3] && !(r[i + 3] & 3)) claim(strings[@(r[i + 3] >> 2)], bid, @"/Data/Application/");
+            NSString *nm = (r[i + 1] & 3) ? nil : strings[@(r[i + 1] >> 2)];
+            NSString *dn = (r[i + 2] & 3) ? nil : strings[@(r[i + 2] >> 2)];
+            NSString *safeDisplay = wq_safe_name(dn);
+            NSString *safeBundleName = wq_safe_name(nm);
+            if (safeDisplay && !layoutDisplay[bid]) layoutDisplay[bid] = safeDisplay;
+            if (safeBundleName && !layoutBundleName[bid]) layoutBundleName[bid] = safeBundleName;
+        }
+        for (NSString *path in layoutContainers.allKeys)
+            if (layoutContainers[path] == NSNull.null) [layoutContainers removeObjectForKey:path];
+        if (!containers || layoutContainers.count > containers.count ||
+            (layoutContainers.count == containers.count && layoutDisplay.count > display.count)) {
+            display = layoutDisplay;
+            bundleName = layoutBundleName;
+            containers = layoutContainers;
+            chosen = l;
+        }
     }
-
-    for (NSString *path in containers.allKeys)
-        if (containers[path] == NSNull.null) [containers removeObjectForKey:path];
-    wq_ls_log_summary(b, n, recs.length / (4 * sizeof(uint32_t)), plugins.length / (2 * sizeof(uint32_t)),
-                      display.count, containers.count);
+    wq_ls_log_summary(b, n, @(kWQLSLayouts[chosen].label), layoutRecs[chosen].length / (4 * sizeof(uint32_t)),
+                      layoutPlugins[chosen].length / (2 * sizeof(uint32_t)), display.count, containers.count);
     if (displayOut) *displayOut = [display copy];
     if (bundleNameOut) *bundleNameOut = [bundleName copy];
     if (containersOut) *containersOut = [containers copy];
