@@ -1,16 +1,20 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <string.h>
+#include <errno.h>
+#include <limits.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // Portable, side-effect-free validation shared by the Apps implementation and
 // its macOS fixture tests. Filesystem agreement is checked by WQApps.m.
-static BOOL WQAppsSupportIsBool(id value)
+static inline BOOL WQAppsSupportIsBool(id value)
 {
     return [value isKindOfClass:NSNumber.class] &&
            CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
 }
 
-static BOOL WQAppsSupportIsInteger(id value)
+static inline BOOL WQAppsSupportIsInteger(id value)
 {
     if (![value isKindOfClass:NSNumber.class]) return NO;
     if (CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
@@ -22,13 +26,13 @@ static BOOL WQAppsSupportIsInteger(id value)
            strcmp(type, @encode(long long)) == 0 || strcmp(type, @encode(unsigned long long)) == 0;
 }
 
-static BOOL WQAppsSupportManifestFailure(NSString **errorOut, NSString *message)
+static inline BOOL WQAppsSupportManifestFailure(NSString **errorOut, NSString *message)
 {
     if (errorOut) *errorOut = message;
     return NO;
 }
 
-static BOOL WQAppsSupportManifestFields(NSDictionary *manifest, NSString *bundleID,
+static inline BOOL WQAppsSupportManifestFields(NSDictionary *manifest, NSString *bundleID,
                                         NSArray<NSString *> **partsOut, NSString **errorOut)
 {
     if (![manifest isKindOfClass:NSDictionary.class]) {
@@ -75,7 +79,77 @@ static BOOL WQAppsSupportManifestFields(NSDictionary *manifest, NSString *bundle
     return YES;
 }
 
-static NSUInteger WQAppsSupportBackupSequence(NSString *name)
+static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeIdentity,
+                                            BOOL *exists, NSString **errorOut)
+{
+    struct stat rootStat;
+    if (lstat(path.fileSystemRepresentation, &rootStat) != 0) {
+        if (errno == ENOENT) {
+            if (exists) *exists = NO;
+            return @"<missing>";
+        }
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect %@", path.lastPathComponent];
+        return nil;
+    }
+    if (!S_ISDIR(rootStat.st_mode)) {
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"%@ is not a directory", path.lastPathComponent];
+        return nil;
+    }
+    NSError *listError = nil;
+    if (![NSFileManager.defaultManager contentsOfDirectoryAtPath:path error:&listError]) {
+        if (errorOut) *errorOut = listError.localizedDescription ?: [NSString stringWithFormat:@"Cannot read %@", path.lastPathComponent];
+        return nil;
+    }
+    if (exists) *exists = YES;
+
+    NSMutableArray<NSString *> *entries = [NSMutableArray new];
+    NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:path];
+    for (NSString *relative in enumerator) {
+        NSString *item = [path stringByAppendingPathComponent:relative];
+        struct stat itemStat;
+        if (lstat(item.fileSystemRepresentation, &itemStat) != 0) {
+            if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect %@", relative];
+            return nil;
+        }
+        unsigned type = (unsigned)(itemStat.st_mode & S_IFMT);
+        NSString *name = [NSString stringWithFormat:@"%lu:%@", (unsigned long)relative.length, relative];
+        NSString *entry = nil;
+        if (includeIdentity) {
+            entry = [NSString stringWithFormat:@"I|%@|%u|%llu|%lld.%09ld|%lld.%09ld|%lld",
+                     name, type, (unsigned long long)itemStat.st_ino,
+                     (long long)itemStat.st_mtimespec.tv_sec, itemStat.st_mtimespec.tv_nsec,
+                     (long long)itemStat.st_ctimespec.tv_sec, itemStat.st_ctimespec.tv_nsec,
+                     (long long)itemStat.st_size];
+        } else if (type == S_IFREG) {
+            entry = [NSString stringWithFormat:@"R|%@|%lld|%u", name,
+                     (long long)itemStat.st_size, (unsigned)(itemStat.st_mode & 07777)];
+        } else if (type == S_IFDIR) {
+            entry = [NSString stringWithFormat:@"D|%@|%u", name, (unsigned)(itemStat.st_mode & 07777)];
+        } else if (type == S_IFLNK) {
+            char target[PATH_MAX];
+            ssize_t length = readlink(item.fileSystemRepresentation, target, sizeof(target) - 1);
+            if (length < 0 || length >= (ssize_t)sizeof(target) - 1) {
+                if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect link %@", relative];
+                return nil;
+            }
+            target[length] = 0;
+            NSString *value = [NSString stringWithUTF8String:target];
+            if (!value) {
+                if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot decode link %@", relative];
+                return nil;
+            }
+            entry = [NSString stringWithFormat:@"L|%lu:%@|%lu:%@",
+                     (unsigned long)relative.length, relative, (unsigned long)value.length, value];
+        } else {
+            entry = [NSString stringWithFormat:@"O|%@|%u", name, type];
+        }
+        [entries addObject:entry];
+    }
+    [entries sortUsingSelector:@selector(compare:)];
+    return [entries componentsJoinedByString:@"\n"];
+}
+
+static inline NSUInteger WQAppsSupportBackupSequence(NSString *name)
 {
     if (![name isKindOfClass:NSString.class] || !name.length) return 0;
     if ([name hasSuffix:@")"]) {
@@ -92,7 +166,7 @@ static NSUInteger WQAppsSupportBackupSequence(NSString *name)
     return 1;
 }
 
-static NSComparisonResult WQAppsSupportCompareBackupMetadata(NSDate *dateA, NSUInteger sequenceA, NSString *nameA,
+static inline NSComparisonResult WQAppsSupportCompareBackupMetadata(NSDate *dateA, NSUInteger sequenceA, NSString *nameA,
                                                               NSDate *dateB, NSUInteger sequenceB, NSString *nameB)
 {
     NSComparisonResult dateOrder = [dateA compare:dateB];

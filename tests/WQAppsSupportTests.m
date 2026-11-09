@@ -87,16 +87,56 @@ static void TestNumericOrdering(void)
                                                 sameTime, 99, @"older") == NSOrderedDescending);
 }
 
+static void TestTreeSignatures(void)
+{
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [@"WQAppsTree-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    NSString *src = [base stringByAppendingPathComponent:@"src"];
+    NSString *dst = [base stringByAppendingPathComponent:@"dst"];
+    @try {
+        WQCheck([fm createDirectoryAtPath:[src stringByAppendingPathComponent:@"nested"]
+              withIntermediateDirectories:YES attributes:nil error:nil]);
+        NSString *file = [src stringByAppendingPathComponent:@"file"];
+        WQCheck([[@"original" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:file atomically:YES]);
+        WQCheck(symlink(file.fileSystemRepresentation,
+                        [src stringByAppendingPathComponent:@"link"].fileSystemRepresentation) == 0);
+
+        NSString *error = nil;
+        BOOL exists = NO;
+        NSString *before = WQAppsSupportTreeSignature(src, YES, &exists, &error);
+        NSString *shape = WQAppsSupportTreeSignature(src, NO, &exists, &error);
+        WQCheck(before.length > 0 && shape.length > 0 && exists);
+
+        WQCheck([fm copyItemAtPath:src toPath:dst error:nil]);
+        NSString *sourceAfter = WQAppsSupportTreeSignature(src, YES, &exists, &error);
+        NSString *sourceShape = WQAppsSupportTreeSignature(src, NO, &exists, &error);
+        NSString *destinationShape = WQAppsSupportTreeSignature(dst, NO, &exists, &error);
+        WQCheck([before isEqualToString:sourceAfter]);       // source did not change
+        WQCheck([sourceShape isEqualToString:destinationShape]); // copy has the same shape
+        NSString *destinationIdentity = WQAppsSupportTreeSignature(dst, YES, &exists, &error);
+        WQCheck(destinationIdentity && ![before isEqualToString:destinationIdentity]);
+
+        // A source mutation after the signature was captured must be visible.
+        WQCheck([[@"original plus more" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:file atomically:YES]);
+        NSString *changed = WQAppsSupportTreeSignature(src, YES, &exists, &error);
+        WQCheck(![before isEqualToString:changed]);
+    } @finally {
+        [fm removeItemAtPath:base error:nil];
+    }
+}
+
 int main(void)
 {
     @autoreleasepool {
         TestManifestTypes();
         TestNumericOrdering();
+        TestTreeSignatures();
         if (failures) {
             fprintf(stderr, "%d Apps regression check(s) failed\n", failures);
             return 1;
         }
-        puts("All Apps manifest/order regression tests passed.");
+        puts("All Apps manifest/order/tree regression tests passed.");
     }
     return 0;
 }

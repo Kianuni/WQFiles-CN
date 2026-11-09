@@ -240,60 +240,20 @@ static BOOL wq_validate_container(NSString *container, NSString *bundleID, dev_t
     return YES;
 }
 
-static NSString *wq_tree_signature(NSString *path, BOOL *exists, NSString **error)
-{
-    NSFileManager *fm = NSFileManager.defaultManager;
-    struct stat st;
-    if (lstat(path.fileSystemRepresentation, &st) != 0) {
-        if (errno == ENOENT) {
-            if (exists) *exists = NO;
-            return @"<missing>";
-        }
-        if (error) *error = [NSString stringWithFormat:@"Cannot inspect %@", path.lastPathComponent];
-        return nil;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        if (error) *error = [NSString stringWithFormat:@"%@ is not a directory", path.lastPathComponent];
-        return nil;
-    }
-    NSError *listError = nil;
-    if (![fm contentsOfDirectoryAtPath:path error:&listError]) {
-        if (error) *error = listError.localizedDescription ?: [NSString stringWithFormat:@"Cannot read %@", path.lastPathComponent];
-        return nil;
-    }
-    if (exists) *exists = YES;
-    NSMutableArray<NSString *> *entries = [NSMutableArray new];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
-    for (NSString *relative in enumerator) {
-        NSString *item = [path stringByAppendingPathComponent:relative];
-        struct stat itemStat;
-        if (lstat(item.fileSystemRepresentation, &itemStat) != 0) {
-            if (error) *error = [NSString stringWithFormat:@"Cannot inspect %@", relative];
-            return nil;
-        }
-        [entries addObject:[NSString stringWithFormat:@"%@|%u|%llu|%llu.%09ld|%llu.%09ld",
-                            relative, (unsigned)(itemStat.st_mode & S_IFMT),
-                            (unsigned long long)itemStat.st_ino,
-                            (unsigned long long)itemStat.st_mtimespec.tv_sec, itemStat.st_mtimespec.tv_nsec,
-                            (unsigned long long)itemStat.st_ctimespec.tv_sec, itemStat.st_ctimespec.tv_nsec]];
-    }
-    [entries sortUsingSelector:@selector(compare:)];
-    return [entries componentsJoinedByString:@"\n"];
-}
-
 static BOOL wq_copy_part_and_verify(NSString *src, NSString *dst, NSString **error)
 {
     BOOL sourceBeforeExists = NO;
-    NSString *sourceBefore = wq_tree_signature(src, &sourceBeforeExists, error);
+    NSString *sourceBefore = WQAppsSupportTreeSignature(src, YES, &sourceBeforeExists, error);
     if (!sourceBefore) return NO;
     if (!wq_copy_contents(src, dst, error)) return NO;
     BOOL srcExists = NO, dstExists = NO;
-    NSString *sourceSignature = wq_tree_signature(src, &srcExists, error);
-    NSString *destinationSignature = wq_tree_signature(dst, &dstExists, error);
-    if (!sourceSignature || !destinationSignature || !sourceBeforeExists || !srcExists || !dstExists ||
-        ![sourceBefore isEqualToString:sourceSignature] ||
-        ![sourceSignature isEqualToString:destinationSignature]) {
-        if (error && !*error) *error = @"The source changed while it was being copied; no snapshot-consistent copy was made";
+    NSString *sourceAfter = WQAppsSupportTreeSignature(src, YES, &srcExists, error);
+    NSString *sourceShape = WQAppsSupportTreeSignature(src, NO, NULL, error);
+    NSString *destinationShape = WQAppsSupportTreeSignature(dst, NO, &dstExists, error);
+    if (!sourceAfter || !sourceShape || !destinationShape || !sourceBeforeExists || !srcExists || !dstExists ||
+        ![sourceBefore isEqualToString:sourceAfter] ||
+        ![sourceShape isEqualToString:destinationShape]) {
+        if (error && !*error) *error = @"The copied tree could not be verified (the source changed or the copy is incomplete)";
         return NO;
     }
     return YES;
@@ -303,7 +263,7 @@ static BOOL wq_purge_and_verify(NSString *dir, unsigned long long *freed, NSStri
 {
     if (!wq_purge_contents(dir, freed)) return NO;
     BOOL exists = NO;
-    NSString *signature = wq_tree_signature(dir, &exists, error);
+    NSString *signature = WQAppsSupportTreeSignature(dir, NO, &exists, error);
     if (!signature) return NO;
     if (exists && signature.length) {
         if (error) *error = [NSString stringWithFormat:@"Some items remain in %@; keep the app closed and try again", dir.lastPathComponent];
@@ -339,7 +299,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
         if (lstat(src.fileSystemRepresentation, &st) != 0 && errno == ENOENT) continue;   // the app has none
         if (!wq_stat(src, &st)) { ok = NO; if (error) *error = [NSString stringWithFormat:@"Cannot access %@", part]; break; }
         BOOL sourceExists = NO;
-        NSString *sourceState = wq_tree_signature(src, &sourceExists, error);
+        NSString *sourceState = WQAppsSupportTreeSignature(src, YES, &sourceExists, error);
         if (!sourceState) { ok = NO; break; }
         sourceStates[part] = sourceState;
         if (!wq_copy_part_and_verify(src, [staging stringByAppendingPathComponent:part], error)) { ok = NO; break; }
@@ -349,7 +309,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
         for (NSString *part in kAppBackupParts()) {
             NSString *src = [container stringByAppendingPathComponent:part];
             BOOL sourceExists = NO;
-            NSString *sourceState = wq_tree_signature(src, &sourceExists, error);
+            NSString *sourceState = WQAppsSupportTreeSignature(src, YES, &sourceExists, error);
             NSString *before = sourceStates[part] ?: @"<missing>";
             if (!sourceState || ![before isEqualToString:sourceState]) {
                 ok = NO;
