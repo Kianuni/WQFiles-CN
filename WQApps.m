@@ -763,23 +763,30 @@ static NSString *wq_restore_journal_path(void)
     return [support stringByAppendingPathComponent:@"active-restore.plist"];
 }
 
-static BOOL wq_begin_restore_journal(WQAppItem *app, NSString *backup, NSString *safety, NSString **error)
+static BOOL wq_read_restore_journal(NSMutableDictionary **journalOut, BOOL *existsOut, NSString **error)
 {
-    if (!wq_backup_root_child(backup, app.bundleID) || !wq_backup_root_child(safety, app.bundleID)) {
-        if (error) *error = @"The restore paths are not inside this app's backup folder";
+    if (journalOut) *journalOut = nil;
+    if (existsOut) *existsOut = NO;
+    NSString *path = wq_restore_journal_path();
+    if (![NSFileManager.defaultManager fileExistsAtPath:path]) return YES;
+    NSDictionary *journal = [NSDictionary dictionaryWithContentsOfFile:path];
+    if (![journal isKindOfClass:NSDictionary.class]) {
+        if (error) *error = @"The restore recovery journal is unreadable";
         return NO;
     }
+    if (existsOut) *existsOut = YES;
+    if (journalOut) *journalOut = [journal mutableCopy];
+    return YES;
+}
+
+static BOOL wq_write_restore_journal(NSDictionary *journal, NSString **error)
+{
     NSString *path = wq_restore_journal_path();
-    NSFileManager *fm = NSFileManager.defaultManager;
-    if (![fm createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES
-                       attributes:nil error:nil]) {
+    if (![NSFileManager.defaultManager createDirectoryAtPath:path.stringByDeletingLastPathComponent
+                                  withIntermediateDirectories:YES attributes:nil error:nil]) {
         if (error) *error = @"Cannot create the restore recovery folder";
         return NO;
     }
-    NSDictionary *journal = @{ @"Format": @2, @"State": @"Active", @"BundleID": app.bundleID,
-                               @"Container": app.container, @"Backup": backup, @"Safety": safety,
-                               @"ContainerDevice": @(app.containerDevice), @"ContainerInode": @(app.containerInode),
-                               @"Started": NSDate.date };
     if (![journal writeToFile:path atomically:YES]) {
         if (error) *error = @"Cannot write the restore recovery journal";
         return NO;
@@ -787,29 +794,55 @@ static BOOL wq_begin_restore_journal(WQAppItem *app, NSString *backup, NSString 
     return YES;
 }
 
-static BOOL wq_clear_restore_journal(NSString **error)
+static BOOL wq_remove_restore_journal(NSString **error);
+
+static BOOL wq_begin_restore_journal(WQAppItem *app, NSString *backup, NSString *safety, NSString **error)
+{
+    if (!wq_backup_root_child(backup, app.bundleID) || !wq_backup_root_child(safety, app.bundleID)) {
+        if (error) *error = @"The restore paths are not inside this app's backup folder";
+        return NO;
+    }
+    NSDictionary *journal = @{ @"Format": @2, @"State": @"Active", @"BundleID": app.bundleID,
+                               @"Container": app.container, @"Backup": backup, @"Safety": safety,
+                               @"ContainerDevice": @(app.containerDevice), @"ContainerInode": @(app.containerInode),
+                               @"Started": NSDate.date };
+    return wq_write_restore_journal(journal, error);
+}
+
+// Marking committed is the point of no return for a completed restore. It is
+// deliberately separate from removal: a committed journal must never cause a
+// later rollback, even if the file itself cannot be deleted right now.
+static BOOL wq_mark_restore_journal_committed(NSString **error)
+{
+    BOOL exists = NO;
+    NSMutableDictionary *journal = nil;
+    NSString *readError = nil;
+    if (!wq_read_restore_journal(&journal, &exists, &readError)) {
+        if (error) *error = readError;
+        return NO;
+    }
+    if (!exists) return YES;
+    journal[@"State"] = @"Committed";
+    return wq_write_restore_journal(journal, error);
+}
+
+static BOOL wq_remove_restore_journal(NSString **error)
 {
     NSString *path = wq_restore_journal_path();
     NSFileManager *fm = NSFileManager.defaultManager;
     if (![fm fileExistsAtPath:path]) return YES;
-    // Mark the transaction committed before removing it. A crash between these
-    // steps must not make the next launch roll back a completed restore.
-    NSMutableDictionary *journal = [[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy];
-    if (!journal) {
-        if (error) *error = @"The restore recovery journal is unreadable";
-        return NO;
-    }
-    journal[@"State"] = @"Committed";
-    if (![journal writeToFile:path atomically:YES]) {
-        if (error) *error = @"Cannot mark the restore recovery journal as committed";
-        return NO;
-    }
     NSError *removeError = nil;
     if (![fm removeItemAtPath:path error:&removeError]) {
         if (error) *error = removeError.localizedDescription ?: @"Cannot remove the restore recovery journal";
         return NO;
     }
     return YES;
+}
+
+static BOOL wq_finish_restore_journal(NSString **error)
+{
+    if (!wq_mark_restore_journal_committed(error)) return NO;
+    return wq_remove_restore_journal(error);
 }
 
 static BOOL wq_rollback_safety(NSString *container, NSString *bundleID, NSString *safety,
@@ -854,7 +887,10 @@ NSString *wq_recover_interrupted_restore(void)
     if (!journal) return nil;
     NSString *state = [journal[@"State"] isKindOfClass:NSString.class] ? journal[@"State"] : nil;
     if ([state isEqualToString:@"Committed"]) {
-        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+        NSString *removeError = nil;
+        if (!wq_remove_restore_journal(&removeError)) {
+            wq_log(@"restore recovery: committed journal cleanup failed: %@", removeError);
+        }
         return nil;
     }
     if (![state isEqualToString:@"Active"]) {
@@ -882,16 +918,25 @@ NSString *wq_recover_interrupted_restore(void)
                 journalError.length ? [NSString stringWithFormat:@" (%@)", journalError] : @""];
     }
     NSString *error = nil;
-    BOOL ok = wq_rollback_safety(container, bundleID, safety, device, inode, &error);
-    if (ok) {
-        NSString *cleanup = nil;
-        if (!wq_clear_restore_journal(&cleanup)) ok = NO;
-        if (!ok) error = cleanup;
+    if (!wq_rollback_safety(container, bundleID, safety, device, inode, &error)) {
+        wq_log(@"restore recovery for %@: FAILED (%@)", bundleID, error);
+        return [NSString stringWithFormat:@"Automatic recovery of %@ failed: %@. The safety backup is %@; see Log.",
+                bundleID, error ?: @"unknown error", safety.lastPathComponent];
     }
-    wq_log(@"restore recovery for %@: %@", bundleID, ok ? @"OK" : error);
-    return ok ? [NSString stringWithFormat:@"An interrupted restore of %@ was recovered from its safety backup.", bundleID]
-              : [NSString stringWithFormat:@"Automatic recovery of %@ failed: %@. The safety backup is %@; see Log.",
-                 bundleID, error ?: @"unknown error", safety.lastPathComponent];
+    NSString *commitError = nil;
+    NSString *removeError = nil;
+    if (!wq_mark_restore_journal_committed(&commitError)) {
+        wq_log(@"restore recovery for %@: recovered, journal commit failed (%@)", bundleID, commitError);
+        return [NSString stringWithFormat:@"An interrupted restore of %@ was recovered, but its journal could not be committed (%@). It will be checked again at the next launch.",
+                bundleID, commitError ?: @"unknown error"];
+    }
+    if (!wq_remove_restore_journal(&removeError)) {
+        wq_log(@"restore recovery for %@: recovered, cleanup pending (%@)", bundleID, removeError);
+        return [NSString stringWithFormat:@"An interrupted restore of %@ was recovered. Its committed journal will be cleaned up at the next launch (%@).",
+                bundleID, removeError ?: @"cleanup failed"];
+    }
+    wq_log(@"restore recovery for %@: OK", bundleID);
+    return [NSString stringWithFormat:@"An interrupted restore of %@ was recovered from its safety backup.", bundleID];
 }
 
 - (void)restore:(WQAppItem *)app from:(NSString *)backup title:(NSString **)title message:(NSString **)message
@@ -972,17 +1017,22 @@ NSString *wq_recover_interrupted_restore(void)
         error = error ?: @"The selected backup changed during restore";
     }
     if (ok) {
-        NSString *cleanupError = nil;
-        if (wq_clear_restore_journal(&cleanupError)) {
+        NSString *commitError = nil;
+        NSString *removeError = nil;
+        if (wq_mark_restore_journal_committed(&commitError)) {
+            BOOL removed = wq_remove_restore_journal(&removeError);
+            if (!removed) wq_log(@"restore %@: journal cleanup pending (%@)", app.bundleID, removeError);
             wq_log(@"restore %@ from %@: OK", app.bundleID, backup.lastPathComponent);
             *title = @"Restored";
-            *message = [NSString stringWithFormat:@"Open %@ to use the restored Documents and Library. The data from before is kept as backup %@; tmp was not changed. Keep the app closed during this operation.",
-                        app.name, safety.lastPathComponent];
+            NSString *cleanup = removed ? @"" : @" The recovery journal is committed and will be cleaned up at the next launch.";
+            *message = [NSString stringWithFormat:@"Open %@ to use the restored Documents and Library. The data from before is kept as backup %@; tmp was not changed. Keep the app closed during this operation.%@",
+                        app.name, safety.lastPathComponent, cleanup];
             return;
         }
-        // Never leave a completed restore with an active journal: the next
-        // launch would otherwise roll it back unexpectedly.
-        error = [NSString stringWithFormat:@"The restore finished, but its recovery journal could not be cleared (%@)", cleanupError];
+        // The journal is still Active. Rolling back is the only safe outcome
+        // if it cannot be marked committed, because a completed restore must
+        // not be rolled back by the next launch.
+        error = [NSString stringWithFormat:@"The restore finished, but its recovery journal could not be committed (%@)", commitError];
     }
     wq_log(@"restore %@ from %@: FAILED (%@), rolling back", app.bundleID, backup.lastPathComponent, error);
     NSString *rollbackError = nil;
@@ -991,7 +1041,8 @@ NSString *wq_recover_interrupted_restore(void)
     // Keep the journal when the rollback failed, so the next launch tries the
     // recovery again instead of leaving the app half restored.
     NSString *cleanupError = nil;
-    BOOL cleared = rolledBack && wq_clear_restore_journal(&cleanupError);
+    BOOL cleared = NO;
+    if (rolledBack) cleared = wq_finish_restore_journal(&cleanupError);
     if (!rolledBack) cleanupError = @"kept for recovery at the next launch";
     wq_log(@"restore %@: rollback %@, journal %@", app.bundleID,
            rolledBack ? @"OK" : @"FAILED", cleared ? @"cleared" : cleanupError);
