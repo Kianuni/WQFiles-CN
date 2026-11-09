@@ -6,6 +6,7 @@
 //
 
 #import "WQHexViewer.h"
+#import "WQHexViewerHelpers.h"
 #import "WQAccess.h"
 #import "WQCore.h"
 #import <sys/stat.h>
@@ -398,8 +399,19 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Go" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSString *t = [a.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        BOOL hex = [t.lowercaseString hasPrefix:@"0x"];
-        unsigned long long off = strtoull((hex ? [t substringFromIndex:2] : t).UTF8String, NULL, hex ? 16 : 10);
+        unsigned long long off = 0;
+        if (!WQHexParseOffset(t, &off)) {
+            wqh_alert(self, @"Invalid offset", @"Enter a complete non-negative decimal value or a 0x-prefixed hexadecimal value.");
+            return;
+        }
+        if (_size == 0) {
+            wqh_alert(self, @"Offset unavailable", @"The file is empty or its size is still loading.");
+            return;
+        }
+        if (off >= _size) {
+            wqh_alert(self, @"Offset out of range", [NSString stringWithFormat:@"Enter an offset from 0x0 through 0x%llx.", _size - 1]);
+            return;
+        }
         [self scrollToOffset:off];
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -417,6 +429,10 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Find" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSString *t = a.textFields.firstObject.text ?: @"";
+        if (!WQHexSearchInputWithinLimit(t)) {
+            wqh_alert(self, @"Search too large", @"Use at most 1 MiB of UTF-8 search input.");
+            return;
+        }
         NSData *needle = hex ? WQParseHex(t, NO) : [t dataUsingEncoding:NSUTF8StringEncoding];
         if (needle.length == 0) { wqh_alert(self, @"Nothing to find", hex ? @"Enter hex bytes, e.g. de ad be ef." : @"Enter some text."); return; }
         NSIndexPath *top = self.tableView.indexPathsForVisibleRows.firstObject;
