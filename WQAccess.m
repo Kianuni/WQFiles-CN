@@ -868,27 +868,39 @@ BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString **errorText)
     NSFileManager *fm = NSFileManager.defaultManager;
     if (!wq_is_own(srcDir)) wq_grant(srcDir);
     if (!wq_is_own(dstDir)) wq_grant(dstDir);
-    [fm createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
     NSError *error = nil;
+    if (![fm createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:&error]) {
+        if (errorText) *errorText = error.localizedDescription ?: @"Cannot create the destination folder";
+        return NO;
+    }
     NSArray *children = [fm contentsOfDirectoryAtPath:srcDir error:&error];
     if (!children) {
         if (errorText) *errorText = error.localizedDescription ?: @"Cannot read the source folder";
         return NO;
     }
     BOOL allOk = YES;
+    NSString *firstFailure = nil;
     for (NSString *name in children) {
         NSString *src = [srcDir stringByAppendingPathComponent:name];
         NSString *dst = [dstDir stringByAppendingPathComponent:name];
         [fm removeItemAtPath:dst error:nil];
         NSError *copyError = nil;
         BOOL ok = [fm copyItemAtPath:src toPath:dst error:&copyError];
-        if (!ok && wq_grant(src)) ok = [fm copyItemAtPath:src toPath:dst error:&copyError];
+        if (!ok && wq_grant(src)) {
+            // copyItemAtPath can leave a partial destination. Retrying over it
+            // would fail with "already exists" and hide the original problem.
+            [fm removeItemAtPath:dst error:nil];
+            NSError *retryError = nil;
+            ok = [fm copyItemAtPath:src toPath:dst error:&retryError];
+            if (!ok) wq_log(@"copy retry: %@ -> %@: %@", src, dst, retryError.localizedDescription);
+        }
         if (!ok) {
             allOk = NO;
+            firstFailure = firstFailure ?: copyError.localizedDescription ?: @"Copy failed";
             wq_log(@"copy: %@ -> %@: %@", src, dst, copyError.localizedDescription);
-            if (errorText && !*errorText) *errorText = copyError.localizedDescription;
         }
     }
+    if (errorText && !allOk) *errorText = firstFailure;
     wq_log(@"copy: %@ -> %@ (%lu items) %@", srcDir, dstDir, (unsigned long)children.count, allOk ? @"OK" : @"with errors");
     return allOk;
 }
