@@ -2469,7 +2469,6 @@ static NSString *wq_recover_interrupted_restore(void)
         }
         // Never leave a completed restore with an active journal: the next
         // launch would otherwise roll it back unexpectedly.
-        ok = NO;
         error = [NSString stringWithFormat:@"The restore finished, but its recovery journal could not be cleared (%@)", cleanupError];
     }
     wq_log(@"restore %@ from %@: FAILED (%@), rolling back", app.bundleID, backup.lastPathComponent, error);

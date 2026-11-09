@@ -517,8 +517,13 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     void (^insert)(NSString *key) = ^(NSString *key) {
         id value = wqp_default(t);
         void (^put)(id) = ^(id v) {
-            if (self.isArray) [self.container addObject:v];
-            else self.container[key] = v;
+            if (self.isArray) {
+                [self.container addObject:v];
+            } else {
+                if (!key.length) return;  // dictionary insertion always has a validated key
+                NSMutableDictionary *dictionary = self.container;
+                dictionary[key] = v;
+            }
             [self changed];
         };
         if (t == WQPTypeDictionary || t == WQPTypeArray || t == WQPTypeBoolean) { put(value); return; }
