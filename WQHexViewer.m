@@ -340,6 +340,10 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
 - (void)save
 {
     if (!_edits.count || [self blockWhileSaving]) return;
+    if (!_version) {
+        wqh_alert(self, @"Save unavailable", @"The file version could not be verified. Close and reopen it before saving.");
+        return;
+    }
     NSDictionary *runs = [self runs];
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Save changes?"
         message:[NSString stringWithFormat:@"%lu bytes in %@ are overwritten in place. The current file is backed up first.",
@@ -347,13 +351,17 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
+        NSDictionary *expectedVersion = [self->_version copy];
+        if (!expectedVersion) {
+            wqh_alert(self, @"Save unavailable", @"The file version could not be verified. Close and reopen it before saving.");
+            return;
+        }
         NSUInteger savedRevision = [self->_editState beginSave];
         [self updateBar];
         NSString *path = self->_path;
         dispatch_async(self->_queue, ^{
             NSString *error = nil;
-            BOOL ok = wq_patch_if_unchanged(path, runs, self->_version, &error);
-            NSDictionary *newVersion = ok ? wq_file_version(path) : nil;
+            BOOL ok = wq_patch_if_unchanged(path, runs, expectedVersion, &error);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self->_editState finishSave:ok revision:savedRevision];
                 if (!ok) {
@@ -361,7 +369,12 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
                     wqh_alert(self, @"Save failed", error ?: wq_permission_hint(path, YES) ?: @"Unknown error");
                     return;
                 }
-                self->_version = newVersion;
+                // The access layer does not return a descriptor-bound version.
+                // Do not sample the path after writing: another writer could
+                // change it before that sample and make the editor trust it.
+                self->_version = nil;
+                self->_readOnly = YES;
+                self->_status = @"Saved. Reopen to continue editing.";
                 if (self->_editState.revision == savedRevision) [self->_edits removeAllObjects];
                 [self->_pages removeAllObjects];
                 [self updateBar];
