@@ -10,7 +10,7 @@ SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 xcrun --sdk iphoneos clang -fobjc-arc -fmodules -arch arm64 -miphoneos-version-min=17.0 \
     -isysroot "$SDK" -Wall -Wextra -Werror -O2 \
     -framework UIKit -framework Foundation -framework Security -framework UniformTypeIdentifiers \
-    WQCore.m WQAccess.m WQUI.m WQSharing.m WQPlistEditor.m WQHexViewer.m main.m -o "$APP/WQFiles"
+    WQCore.m WQAccess.m WQUI.m WQSharing.m WQApps.m WQCache.m WQPlistEditor.m WQHexViewer.m main.m -o "$APP/WQFiles"
 cp Info.plist "$APP/Info.plist"
 cp icons/AppIcon*@*.png "$APP/"
 plutil -convert binary1 "$APP/Info.plist"
