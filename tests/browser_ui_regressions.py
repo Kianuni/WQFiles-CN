@@ -31,6 +31,9 @@ require(main, "initWithPath:wq_backup_root() title:@\"Backups\"", "Backups root 
 require(main, "if (!_version)", "nil editor version refusal")
 forbid(main, "childPaths.count) ? nil : error", "count-based enumeration success check")
 forbid(main, "wq_backup_root().stringByDeletingLastPathComponent title:@\"Backups\"", "parent-path Backups navigation")
+text_save = main.split("- (void)toggleEdit:", 1)[1].split("- (void)share:", 1)[0]
+require(text_save, "wq_write_if_unchanged_get_version", "descriptor-verified text save result")
+forbid(text_save, "wq_file_version(", "post-write pathname version adoption")
 
 require(header, "void wq_share_cancel(UIViewController *host);", "share cancellation API")
 require(sharing, "__weak UIViewController *weakHost", "weak sharing host")
@@ -38,5 +41,7 @@ require(sharing, "preparation.cancelled", "abandoned folder preparation")
 require(sharing, "wq_remove_export(outDir)", "abandoned export cleanup")
 require(sharing, "Only regular files can be shared.", "special-file share refusal")
 require(ui, "host.presentedViewController && !host.presentedViewController.isBeingDismissed", "validated alert host")
+clear_preparation = sharing.split("static void wq_clear_preparation", 1)[1].split("static BOOL wq_present_share", 1)[0]
+require(clear_preparation, "if (!host) return;", "nil weak host association guard")
 
 print("browser UI regression checks: PASS")

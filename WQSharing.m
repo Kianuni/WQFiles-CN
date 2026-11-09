@@ -57,6 +57,7 @@ static BOOL wq_shareable_regular_file(NSString *path)
 
 static void wq_clear_preparation(UIViewController *host, WQSharePreparation *preparation)
 {
+    if (!host) return;
     if (objc_getAssociatedObject(host, &kWQSharePreparationKey) == preparation) {
         objc_setAssociatedObject(host, &kWQSharePreparationKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
@@ -88,6 +89,7 @@ static BOOL wq_present_share(UIViewController *host, NSString *file, NSString *e
 // The export is removed by the worker's completion, after any in-progress copy has stopped.
 void wq_share_cancel(UIViewController *host)
 {
+    if (!host) return;
     WQSharePreparation *preparation = objc_getAssociatedObject(host, &kWQSharePreparationKey);
     preparation.cancelled = YES;
     if (host) objc_setAssociatedObject(host, &kWQSharePreparationKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
