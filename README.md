@@ -96,11 +96,13 @@ and only change what you understand.
   refuses. See the `grant failed`/`enumerate` lines in **Log**.
 - **`(no label)`**: a token was obtained, but the container identifier
   (`com.apple.containermanager.identifier` xattr or the container metadata
-  plist) could not be read. WQ Files now also asks the container manager for a
-  path-to-identifier map before giving up, which covers containers whose
-  xattr or root-only metadata plist is unavailable. If the identifier is still
-  missing (for example a system/daemon container with none), the folder stays
-  browsable but cannot be backed up or cleared until identity is available.
+  plist) could not be read. On iOS 27.2 the attribute can't be read at all,
+  so WQ Files also asks the container manager for a path-to-identifier map
+  and then looks the container up in the LaunchServices database, which lists
+  the data container of every app and most extensions. If the identifier is
+  still missing (for example a system/daemon container with none, or an
+  extension the database doesn't list), the folder stays browsable but cannot
+  be backed up or cleared until identity is available.
 
 ## Install with AltStore or SideStore
 

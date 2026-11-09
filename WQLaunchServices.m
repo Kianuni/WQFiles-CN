@@ -150,7 +150,11 @@ static NSString *wq_cs_string(const uint8_t *b, size_t n, size_t o)
 {
     if (o > n || n - o < 8) return nil;
     uint32_t len = wq_rd32(b + o + 4);
-    if (len == 0 || len >= 0x800 || len >= n - o - 8 || b[o + 8 + len] != 0) return nil;
+    // Strings are padded with zero bytes to a multiple of 4. One whose length
+    // is already a multiple of 4 has no terminator (container paths are 84 or
+    // 88 bytes), so only shorter ones must end in a zero byte. A string must
+    // still end before the buffer does.
+    if (len == 0 || len >= 0x800 || len >= n - o - 8 || (len % 4 && b[o + 8 + len] != 0)) return nil;
     if (memchr(b + o + 8, 0, len)) return nil;
     NSString *s = [[NSString alloc] initWithBytes:b + o + 8 length:len encoding:NSUTF8StringEncoding];
     return s;
@@ -212,11 +216,31 @@ static NSString *wq_safe_name(NSString *value)
     return normalized;
 }
 
+// Data container path -> bundle id. Apps: the Bundle record's +0x68 field;
+// extensions: 0x118-byte plugin records with the bundle id at +0x00 and the
+// path at +0x54. On iOS 27.2 the containers' identifier attribute can't be
+// read, so this is how their folders get a bundle id (and a name).
+static BOOL wq_is_data_container_path(NSString *path)
+{
+    static NSArray<NSString *> *prefixes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        prefixes = @[@"/private/var/mobile/Containers/Data/Application/",
+                     @"/private/var/mobile/Containers/Data/PluginKitPlugin/"];
+    });
+    for (NSString *prefix in prefixes) {
+        if (![path hasPrefix:prefix] || path.length != prefix.length + 36) continue;
+        return [[NSUUID alloc] initWithUUIDString:[path substringFromIndex:prefix.length]] != nil;
+    }
+    return NO;
+}
+
 static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
-                              NSDictionary **bundleNameOut)
+                              NSDictionary **bundleNameOut, NSDictionary **containersOut)
 {
     if (displayOut) *displayOut = nil;
     if (bundleNameOut) *bundleNameOut = nil;
+    if (containersOut) *containersOut = nil;
 
     const uint8_t *b = data.bytes;
     size_t n = data.length;
@@ -232,7 +256,8 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
     const uint32_t kIDs = kWQLSMaxStringID;
     size_t bitsetBytes = kIDs / 8;
     uint8_t *need = calloc(bitsetBytes, 1), *inHeap = calloc(bitsetBytes, 1);
-    NSMutableData *recs = [NSMutableData dataWithCapacity:kWQLSMaxBundleRecords * 3 * sizeof(uint32_t)];
+    NSMutableData *recs = [NSMutableData dataWithCapacity:kWQLSMaxBundleRecords * 4 * sizeof(uint32_t)];
+    NSMutableData *plugins = [NSMutableData new];   // pairs: bundle id ref, container path ref
     if (!need || !inHeap || !recs) {
         free(need);
         free(inHeap);
@@ -242,16 +267,27 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
 
     BOOL tooManyRecords = NO;
     for (size_t o = 0; o <= n - 8 - 0x250; o += 4) {
-        if (wq_rd32(b + o + 4) != 0x250) continue;
-        if (recs.length / (3 * sizeof(uint32_t)) >= kWQLSMaxBundleRecords) {
+        uint32_t size = wq_rd32(b + o + 4);
+        if (size == 0x118) {
+            const uint8_t *u = b + o + 8;
+            uint32_t p[2] = { wq_rd32(u + 0x00), wq_rd32(u + 0x54) };
+            if (p[0] && !(p[0] & 3) && (p[0] >> 2) < kIDs && p[1] && !(p[1] & 3) && (p[1] >> 2) < kIDs &&
+                plugins.length / sizeof(p) < kWQLSMaxBundleRecords) {
+                [plugins appendBytes:p length:sizeof(p)];
+                for (int i = 0; i < 2; i++) need[(p[i] >> 2) / 8] |= 1 << ((p[i] >> 2) % 8);
+            }
+            continue;
+        }
+        if (size != 0x250) continue;
+        if (recs.length / (4 * sizeof(uint32_t)) >= kWQLSMaxBundleRecords) {
             tooManyRecords = YES;
             break;
         }
         const uint8_t *u = b + o + 8;
-        uint32_t r[3] = { wq_rd32(u + 0x0c), wq_rd32(u + 0x6c), wq_rd32(u + 0x74) };
+        uint32_t r[4] = { wq_rd32(u + 0x0c), wq_rd32(u + 0x6c), wq_rd32(u + 0x74), wq_rd32(u + 0x68) };
         if (!r[0] || (r[0] & 3) || (r[0] >> 2) >= kIDs) continue;
         [recs appendBytes:r length:sizeof(r)];
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             if (r[i] && !(r[i] & 3) && (r[i] >> 2) < kIDs)
                 need[(r[i] >> 2) / 8] |= 1 << ((r[i] >> 2) % 8);
         }
@@ -295,10 +331,22 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
     }
 
     NSMutableDictionary *display = [NSMutableDictionary new], *bundleName = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, id> *containers = [NSMutableDictionary new];
+    // A path claimed by two different bundle ids is left out rather than guessed.
+    void (^claim)(NSString *, NSString *) = ^(NSString *path, NSString *bid) {
+        if (!wq_is_data_container_path(path) || !wq_looks_like_bundle_id(bid)) return;
+        id known = containers[path];
+        if (!known) containers[path] = bid;
+        else if (![known isEqual:bid]) containers[path] = NSNull.null;
+    };
+    const uint32_t *pr = plugins.bytes;
+    for (NSUInteger i = 0; i < plugins.length / sizeof(uint32_t); i += 2)
+        claim(strings[@(pr[i + 1] >> 2)], strings[@(pr[i] >> 2)]);
     const uint32_t *r = recs.bytes;
-    for (NSUInteger i = 0; i < recs.length / sizeof(uint32_t); i += 3) {
+    for (NSUInteger i = 0; i < recs.length / sizeof(uint32_t); i += 4) {
         NSString *bid = strings[@(r[i] >> 2)];
         if (!wq_looks_like_bundle_id(bid)) continue;
+        if (r[i + 3] && !(r[i + 3] & 3)) claim(strings[@(r[i + 3] >> 2)], bid);
         NSString *nm = (r[i + 1] & 3) ? nil : strings[@(r[i + 1] >> 2)];
         NSString *dn = (r[i + 2] & 3) ? nil : strings[@(r[i + 2] >> 2)];
         NSString *safeDisplay = wq_safe_name(dn);
@@ -307,13 +355,17 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         if (safeBundleName && !bundleName[bid]) bundleName[bid] = safeBundleName;
     }
 
+    for (NSString *path in containers.allKeys)
+        if (containers[path] == NSNull.null) [containers removeObjectForKey:path];
     if (displayOut) *displayOut = [display copy];
     if (bundleNameOut) *bundleNameOut = [bundleName copy];
+    if (containersOut) *containersOut = [containers copy];
     return YES;
 }
 
 static NSDictionary *gLSDisplay;
 static NSDictionary *gLSBundleName;
+static NSDictionary *gLSContainers;
 static NSString *gLSStorePath;
 static NSDictionary *gLSStoreSignature;
 static BOOL gLSLoaded;
@@ -325,6 +377,7 @@ static void wq_ls_clear_snapshot_if_changed(BOOL changed)
     if (!changed) return;
     gLSDisplay = nil;
     gLSBundleName = nil;
+    gLSContainers = nil;
     gLSStorePath = nil;
     gLSStoreSignature = nil;
     gLSLoaded = NO;
@@ -405,8 +458,8 @@ static void wq_load_ls_names_locked(void)
         return;
     }
 
-    NSDictionary *display = nil, *bundleName = nil;
-    if (!wq_parse_ls_store(data, &display, &bundleName)) {
+    NSDictionary *display = nil, *bundleName = nil, *containers = nil;
+    if (!wq_parse_ls_store(data, &display, &bundleName, &containers)) {
         wq_ls_clear_snapshot_if_changed(snapshotChanged);
         wq_ls_note_failure(now, wq_ls_error(path, @"store rejected by bounded parser"));
         return;
@@ -424,6 +477,7 @@ static void wq_load_ls_names_locked(void)
     // validated parse. Readers therefore see either the previous snapshot or this one.
     gLSDisplay = [display copy] ?: @{};
     gLSBundleName = [bundleName copy] ?: @{};
+    gLSContainers = [containers copy] ?: @{};
     gLSStorePath = [path copy];
     gLSStoreSignature = [beforeSignature copy];
     gLSLoaded = YES;
@@ -516,6 +570,18 @@ void wq_display_names_reset_miss(void)
         [NSUserDefaults.standardUserDefaults removeObjectForKey:kWQLSMissKey];
         gLSNextRetryAt = 0;
         gLSFailureCount = 0;
+    }
+}
+
+NSString *wq_bundle_id_for_container(NSString *path)
+{
+    if (!path.length) return nil;
+    NSString *key = path.stringByStandardizingPath;
+    if ([key hasPrefix:@"/var/"]) key = [@"/private" stringByAppendingString:key];
+    @synchronized (wq_ls_lock()) {
+        wq_load_ls_names_locked();
+        NSString *bid = gLSContainers[key];
+        return [bid isKindOfClass:NSString.class] ? bid : nil;
     }
 }
 

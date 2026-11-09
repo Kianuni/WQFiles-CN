@@ -147,6 +147,9 @@ BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString *_Nullable *_
 
 // MCM container identifier (bundle or group id) of a container folder.
 NSString *_Nullable wq_container_label(NSString *dir);
+// Extra source for wq_container_label, tried after the identifier attribute and
+// the container-manager table: path (/private/var/...) -> identifier or nil.
+void wq_set_container_label_resolver(NSString *_Nullable (*_Nullable resolver)(NSString *path));
 
 // Backups of overwritten or deleted files, mirrored by original path.
 NSString *wq_backup_root(void);

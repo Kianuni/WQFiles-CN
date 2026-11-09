@@ -11,6 +11,11 @@ NS_ASSUME_NONNULL_BEGIN
 // lsd's container), a built-in table of Apple services, or the parent app.
 NSString *_Nullable wq_display_name(NSString *_Nullable bundleID);
 
+// Bundle id of an app or extension data container (/private/var/mobile/
+// Containers/Data/...), from the same LaunchServices database. For iOS 27.2,
+// where the containers' identifier attribute can't be read. Nil if unknown.
+NSString *_Nullable wq_bundle_id_for_container(NSString *path);
+
 // Whether the name database is loaded; loading it (blocking, off the main
 // thread) the first time can take a while, so screens show a status for it.
 BOOL wq_display_names_loaded(void);

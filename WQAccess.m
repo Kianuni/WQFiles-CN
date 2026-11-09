@@ -116,7 +116,8 @@ typedef void *(*cq_result_fn)(void *);
 typedef void (*cq_free_fn)(void *);
 typedef char *(*cq_token_fn)(void *);
 typedef int64_t (*ext_consume_fn)(const char *);
-typedef void (*cq_iterate_fn)(void *, void (^)(void *));
+// The callback returns true to continue; a void block leaves that value undefined.
+typedef void (*cq_iterate_fn)(void *, bool (^)(void *));
 typedef const char *(*co_get_path_fn)(void *);
 typedef const char *(*co_get_id_fn)(void *);
 
@@ -1746,16 +1747,17 @@ static NSDictionary<NSString *, NSString *> *wq_container_identifier_map(void)
                     void *query = create();
                     if (!query) continue;
                     setClass(query, classes[i]);
-                    iterate(query, ^(void *object) {
-                        if (!object) return;
+                    iterate(query, ^bool(void *object) {
+                        if (!object) return true;
                         const char *path = getPath(object);
                         const char *ident = getIdentifier ? getIdentifier(object) : NULL;
-                        if (!path || !path[0] || !ident || !ident[0]) return;
+                        if (!path || !path[0] || !ident || !ident[0]) return true;
                         NSString *p = [NSString stringWithUTF8String:path];
                         NSString *v = [NSString stringWithUTF8String:ident];
-                        if (!p.length || !v.length) return;
+                        if (!p.length || !v.length) return true;
                         NSString *key = WQCanonicalVarPath(p);
                         if (key.length && !map[key]) map[key] = v;
+                        return true;
                     });
                     freeQuery(query);
                 }
@@ -1766,6 +1768,13 @@ static NSDictionary<NSString *, NSString *> *wq_container_identifier_map(void)
         cachedAt = now;
         return cached;
     }
+}
+
+static NSString *(*gContainerLabelResolver)(NSString *path);
+
+void wq_set_container_label_resolver(NSString *(*resolver)(NSString *path))
+{
+    gContainerLabelResolver = resolver;
 }
 
 NSString *wq_container_label(NSString *dir)
@@ -1788,6 +1797,10 @@ NSString *wq_container_label(NSString *dir)
     // file permission and can also label containers whose plist is root-only.
     NSString *queried = wq_container_identifier_map()[WQCanonicalVarPath(dir)];
     if (queried.length) return queried;
+    // The LaunchServices database maps app and extension data containers to
+    // bundle ids (set by the app; this file doesn't depend on that module).
+    NSString *resolved = gContainerLabelResolver ? gContainerLabelResolver(WQCanonicalVarPath(dir)) : nil;
+    if (resolved.length) return resolved;
     // The metadata plist is usually root-only (mode 600); only try it when the
     // owner and mode let this app read it, so the Log isn't flooded.
     NSString *meta = [dir stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];

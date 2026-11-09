@@ -8,6 +8,7 @@
 #import <sys/stat.h>
 #import <unistd.h>
 #import "WQAccess.h"
+#import "WQLaunchServices.h"
 
 static int failures;
 
@@ -114,6 +115,67 @@ static void TestRefreshAndUnicodeSafety(NSString *path)
     WQCheck([wq_display_name(@"com.example.international") isEqualToString:@"Fresh name"]);
 }
 
+static void PutString(NSMutableData *data, NSUInteger offset, uint32_t sid, NSString *value)
+{
+    NSData *utf8 = [value dataUsingEncoding:NSUTF8StringEncoding];
+    Put32(data, offset, sid);
+    Put32(data, offset + 4, (uint32_t)utf8.length);
+    memcpy((uint8_t *)data.mutableBytes + offset + 8, utf8.bytes, utf8.length);
+    // No terminator when the length is a multiple of 4, like the real store;
+    // fill the next word so a missing-terminator bug would read garbage.
+    if (utf8.length % 4 == 0) ((uint8_t *)data.mutableBytes)[offset + 8 + utf8.length] = 0x30;
+    else ((uint8_t *)data.mutableBytes)[offset + 8 + utf8.length] = 0;
+}
+
+static NSString *const kAppPath = @"/private/var/mobile/Containers/Data/Application/4CE791DB-6B04-4A39-8F59-AF32BA61D494";
+static NSString *const kPluginPath = @"/private/var/mobile/Containers/Data/PluginKitPlugin/42D859EB-1323-451C-88F6-01AEE4F45958";
+static NSString *const kSharedPath = @"/private/var/mobile/Containers/Data/PluginKitPlugin/051B043F-07C6-4AB6-9B43-F70BFA8B1A81";
+
+// Bundle record: +0x0c id, +0x68 container path, +0x6c name, +0x74 display
+// name. Plugin records (0x118 bytes): +0x00 id, +0x54 container path.
+static NSData *StoreWithContainers(void)
+{
+    NSMutableData *data = [NSMutableData dataWithLength:0x3000];
+    memcpy(data.mutableBytes, "bdsl", 4);
+    const NSUInteger bundle = 0x200, plugin = 0x500, other = 0x700, third = 0x900;
+    Put32(data, bundle + 4, 0x250);
+    Put32(data, bundle + 8 + 0x0c, 1u << 2);
+    Put32(data, bundle + 8 + 0x68, 2u << 2);
+    Put32(data, bundle + 8 + 0x6c, 3u << 2);
+    Put32(data, bundle + 8 + 0x74, 3u << 2);
+    Put32(data, plugin + 4, 0x118);
+    Put32(data, plugin + 8 + 0x00, 4u << 2);
+    Put32(data, plugin + 8 + 0x54, 5u << 2);
+    // Two extensions claiming the same container: neither is trusted.
+    Put32(data, other + 4, 0x118);
+    Put32(data, other + 8 + 0x00, 4u << 2);
+    Put32(data, other + 8 + 0x54, 6u << 2);
+    Put32(data, third + 4, 0x118);
+    Put32(data, third + 8 + 0x00, 7u << 2);
+    Put32(data, third + 8 + 0x54, 6u << 2);
+    PutString(data, 0x1000, 1, @"com.example.app");
+    PutString(data, 0x1080, 2, kAppPath);                       // 84 bytes
+    PutString(data, 0x1100, 3, @"AppName8");                    // 8 bytes
+    PutString(data, 0x1180, 4, @"com.example.app.widget");
+    PutString(data, 0x1200, 5, kPluginPath);                    // 88 bytes
+    PutString(data, 0x1280, 6, kSharedPath);
+    PutString(data, 0x1300, 7, @"com.example.other");
+    return data;
+}
+
+static void TestContainerMapping(NSString *path)
+{
+    WriteData(StoreWithContainers(), path);
+    [NSUserDefaults.standardUserDefaults setObject:path forKey:@"WQLaunchServicesStore"];
+    WQCheck([wq_bundle_id_for_container(kAppPath) isEqualToString:@"com.example.app"]);
+    WQCheck([wq_bundle_id_for_container([kAppPath substringFromIndex:8]) isEqualToString:@"com.example.app"]);  // /var/...
+    WQCheck([wq_bundle_id_for_container(kPluginPath) isEqualToString:@"com.example.app.widget"]);
+    WQCheck(wq_bundle_id_for_container(kSharedPath) == nil);
+    WQCheck(wq_bundle_id_for_container(@"/private/var/mobile/Containers/Data/Application/not-a-uuid") == nil);
+    // A display name whose length is a multiple of 4 has no terminator.
+    WQCheck([wq_display_name(@"com.example.app") isEqualToString:@"AppName8"]);
+}
+
 static void TestOversizedStoreFailsClosed(NSString *path)
 {
     int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -135,6 +197,7 @@ int main(void)
             [NSUserDefaults.standardUserDefaults removeObjectForKey:@"WQLaunchServicesStore"];
             TestRetryAfterDiscoveryFailure(path);
             TestRefreshAndUnicodeSafety(path);
+            TestContainerMapping(path);
             TestOversizedStoreFailsClosed(path);
         } @finally {
             [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
