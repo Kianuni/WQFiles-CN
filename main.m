@@ -463,6 +463,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     NSUInteger _scanGeneration;
     BOOL _scanInFlight;
     BOOL _scanNeedsRefresh;
+    NSTimeInterval _lastReloadFinished;
 }
 
 - (instancetype)initWithPath:(NSString *)path title:(NSString *)title
@@ -511,7 +512,9 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    if (_scanNeedsRefresh) [self reload];
+    if (_scanInFlight) return;
+    NSTimeInterval age = NSDate.date.timeIntervalSinceReferenceDate - _lastReloadFinished;
+    if (_scanNeedsRefresh || _lastReloadFinished <= 0 || age > 2.0) [self reload];
 }
 
 - (void)viewWillDisappear:(BOOL)animated
@@ -732,6 +735,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             [self applyFilter];
             self->_error = (names || childPaths != nil) ? nil : error;
             self->_scanStatus = nil;
+            self->_lastReloadFinished = NSDate.date.timeIntervalSinceReferenceDate;
             [self.refreshControl endRefreshing];
             [self updateHeader];
             [self.tableView reloadData];
@@ -802,6 +806,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                      : @"Only regular files can be viewed.");
             return;
         }
+        _scanNeedsRefresh = YES;
         wq_open_file(self.navigationController, item.path, self.readOnly, WQOpenAuto);
         return;
     }

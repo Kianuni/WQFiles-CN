@@ -20,7 +20,7 @@ def forbid(text: str, needle: str, label: str) -> None:
 
 
 require(main, "BOOL _scanNeedsRefresh;", "scan refresh state")
-require(main, "if (_scanNeedsRefresh) [self reload];", "restart after canceled scan")
+require(main, "_scanNeedsRefresh || _lastReloadFinished <= 0", "restart after canceled scan or stale metadata")
 require(main, "self->_scanStatus = nil;", "canceled scan status cleanup")
 require(main, "self->_scanInFlight = NO;", "scan completion state cleanup")
 require(main, "self->_error = (names || childPaths != nil) ? nil : error;", "empty enumeration success")
@@ -43,6 +43,8 @@ require(cache, "_cleanRequiresRescan", "clean requires rescan after a validation
 require(cache, "item.selected = !item.limited", "limited cache rows are not selected")
 require(cache, "if (item.crashLogs)", "crash-log context menu branch")
 require(cache, "NSUInteger appCount = 0;", "cache header excludes crash logs from app count")
+require(cache, "self.refreshControl = [UIRefreshControl new];", "cache refresh control")
+require(cache, "_lastScanFinished > 0", "cache rescans stale data on appearance")
 require(sharing, "__weak UIViewController *weakHost", "weak sharing host")
 require(sharing, "preparation.cancelled", "abandoned folder preparation")
 require(sharing, "wq_remove_export(outDir)", "abandoned export cleanup")

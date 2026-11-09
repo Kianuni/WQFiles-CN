@@ -372,6 +372,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     BOOL _scanning, _cleaning, _scanLimited, _cleanRequiresRescan;
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
+    NSTimeInterval _lastScanFinished;
 }
 
 - (instancetype)init { return [super initWithStyle:UITableViewStyleInsetGrouped]; }
@@ -388,19 +389,29 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     self.navigationItem.searchController = search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
+    self.refreshControl = [UIRefreshControl new];
+    [self.refreshControl addTarget:self action:@selector(scan) forControlEvents:UIControlEventValueChanged];
     [self scan];
 }
 
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    if (_scanning && _scanCancellation.isCancelled) [self scan];
+    if (_scanning && _scanCancellation.isCancelled) {
+        [self scan];
+        return;
+    }
+    if (!_scanning && !_cleaning && _lastScanFinished > 0 &&
+        NSDate.date.timeIntervalSinceReferenceDate - _lastScanFinished > 60.0) {
+        [self scan];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
     if (_scanning) [_scanCancellation cancel];
+    [self.refreshControl endRefreshing];
 }
 
 - (NSArray<WQCacheItem *> *)visibleItems
@@ -616,6 +627,8 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
             self->_scanning = NO;
             self->_scanLimited = scanLimited;
             self->_status = note;
+            self->_lastScanFinished = NSDate.date.timeIntervalSinceReferenceDate;
+            [self.refreshControl endRefreshing];
             [self.tableView reloadData];
             [self updateButtons];
         });
