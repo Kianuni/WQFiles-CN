@@ -7,6 +7,7 @@
 
 #import "WQHexViewer.h"
 #import "WQAccess.h"
+#import "WQCore.h"
 #import <sys/stat.h>
 
 static const NSUInteger kPageSize = 64 * 1024;
@@ -20,21 +21,6 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
     [host presentViewController:a animated:YES completion:nil];
 }
 
-static NSData *wqh_parse_hex(NSString *text)
-{
-    NSMutableData *out = [NSMutableData new];
-    int nibble = -1;
-    for (NSUInteger i = 0; i < text.length; i++) {
-        unichar c = [text characterAtIndex:i];
-        if ([NSCharacterSet.whitespaceAndNewlineCharacterSet characterIsMember:c]) continue;
-        if (!isxdigit(c)) return nil;
-        int v = isdigit(c) ? c - '0' : (tolower(c) - 'a' + 10);
-        if (nibble < 0) nibble = v;
-        else { uint8_t b = (uint8_t)(nibble << 4 | v); [out appendBytes:&b length:1]; nibble = -1; }
-    }
-    return nibble < 0 ? out : nil;
-}
-
 @implementation WQHexViewController {
     NSString *_path;
     BOOL _readOnly;
@@ -44,8 +30,7 @@ static NSData *wqh_parse_hex(NSString *text)
     NSCache<NSNumber *, NSData *> *_pages;
     NSMutableSet<NSNumber *> *_loading;
     NSMutableDictionary<NSNumber *, NSNumber *> *_edits;   // offset -> new byte
-    NSUInteger _revision;
-    BOOL _saving;
+    WQEditState *_editState;
     NSDictionary<NSString *, NSNumber *> *_version;
     unsigned long long _matchOffset;
     NSUInteger _matchLength;
@@ -64,6 +49,7 @@ static NSData *wqh_parse_hex(NSString *text)
         _pages.countLimit = 64;   // 4 MB
         _loading = [NSMutableSet new];
         _edits = [NSMutableDictionary new];
+        _editState = [WQEditState new];
         _queue = dispatch_queue_create("wqfiles.hex", DISPATCH_QUEUE_SERIAL);
         self.title = path.lastPathComponent;
     }
@@ -132,19 +118,19 @@ static NSData *wqh_parse_hex(NSString *text)
     NSString *size = [NSByteCountFormatter stringFromByteCount:(long long)_size countStyle:NSByteCountFormatterCountStyleFile];
     NSString *prompt = _status ?: [NSString stringWithFormat:@"%@ · %llu bytes%@%@", size, _size,
                                    _edits.count ? [NSString stringWithFormat:@" · %lu changed", (unsigned long)_edits.count] : @"",
-                                   _saving ? @" · Saving…" : @""];
+                                   _editState.saving ? @" · Saving…" : @""];
     self.navigationItem.prompt = prompt;
     NSMutableArray *items = [NSMutableArray array];
     if (!_readOnly) {
         UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithTitle:@"Save" style:UIBarButtonItemStyleDone
                                                                 target:self action:@selector(save)];
-        save.enabled = _edits.count > 0 && !_saving;
+        save.enabled = _edits.count > 0 && !_editState.saving;
         [items addObject:save];
     }
     __weak typeof(self) weakSelf = self;
     UIAction *discard = [UIAction actionWithTitle:@"Discard Changes" image:[UIImage systemImageNamed:@"arrow.uturn.backward"] identifier:nil
                                       handler:^(UIAction *__unused a) { [weakSelf discard]; }];
-    if (_saving) discard.attributes = UIMenuElementAttributesDisabled;
+    if (_editState.saving) discard.attributes = UIMenuElementAttributesDisabled;
     UIMenu *menu = [UIMenu menuWithChildren:@[
         [UIAction actionWithTitle:@"Go to Offset…" image:[UIImage systemImageNamed:@"arrow.right.to.line"] identifier:nil
                           handler:^(UIAction *__unused a) { [weakSelf goToOffset]; }],
@@ -252,7 +238,7 @@ static NSData *wqh_parse_hex(NSString *text)
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (_readOnly || _saving) return;
+    if (_readOnly || _editState.saving) return;
     unsigned long long start = (unsigned long long)indexPath.row * _perRow;
     NSUInteger count = (NSUInteger)MIN((unsigned long long)_perRow, _size - start);
     NSMutableString *current = [NSMutableString new];
@@ -272,7 +258,7 @@ static NSData *wqh_parse_hex(NSString *text)
     }];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Set" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
-        NSData *bytes = wqh_parse_hex(a.textFields.firstObject.text ?: @"");
+        NSData *bytes = WQParseHex(a.textFields.firstObject.text ?: @"", NO);
         if (bytes.length != count) {
             wqh_alert(self, @"Not changed", [NSString stringWithFormat:@"Enter exactly %lu bytes in hex.", (unsigned long)count]);
             return;
@@ -283,7 +269,7 @@ static NSData *wqh_parse_hex(NSString *text)
             if ([self originalByteAt:off] == nb[i]) [self->_edits removeObjectForKey:@(off)];
             else self->_edits[@(off)] = @(nb[i]);
         }
-        self->_revision++;
+        [self->_editState noteChange];
         [self updateBar];
         [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
     }]];
@@ -294,7 +280,7 @@ static NSData *wqh_parse_hex(NSString *text)
 
 - (BOOL)wq_needsLeaveConfirmation
 {
-    return _edits.count > 0 || _saving;
+    return _edits.count > 0 || _editState.saving;
 }
 
 - (NSDictionary<NSNumber *, NSData *> *)runs
@@ -317,7 +303,7 @@ static NSData *wqh_parse_hex(NSString *text)
 
 - (BOOL)blockWhileSaving
 {
-    if (!_saving) return NO;
+    if (!_editState.saving) return NO;
     wqh_alert(self, @"Save in progress", @"Wait for the save to finish before leaving or changing these edits.");
     return YES;
 }
@@ -332,8 +318,7 @@ static NSData *wqh_parse_hex(NSString *text)
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
-        NSUInteger savedRevision = self->_revision;
-        self->_saving = YES;
+        NSUInteger savedRevision = [self->_editState beginSave];
         [self updateBar];
         NSString *path = self->_path;
         dispatch_async(self->_queue, ^{
@@ -341,14 +326,14 @@ static NSData *wqh_parse_hex(NSString *text)
             BOOL ok = wq_patch_if_unchanged(path, runs, self->_version, &error);
             NSDictionary *newVersion = ok ? wq_file_version(path) : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
-                self->_saving = NO;
+                [self->_editState finishSave:ok revision:savedRevision];
                 if (!ok) {
                     [self updateBar];
                     wqh_alert(self, @"Save failed", error ?: wq_permission_hint(path, YES) ?: @"Unknown error");
                     return;
                 }
                 self->_version = newVersion;
-                if (self->_revision == savedRevision) [self->_edits removeAllObjects];
+                if (self->_editState.revision == savedRevision) [self->_edits removeAllObjects];
                 [self->_pages removeAllObjects];
                 [self updateBar];
                 [self.tableView reloadData];
@@ -362,7 +347,7 @@ static NSData *wqh_parse_hex(NSString *text)
 {
     if ([self blockWhileSaving]) return;
     [_edits removeAllObjects];
-    _revision++;
+    [_editState discard];
     [self updateBar];
     [self.tableView reloadData];
 }
@@ -377,7 +362,7 @@ static NSData *wqh_parse_hex(NSString *text)
     [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
         [self->_edits removeAllObjects];
-        self->_revision++;
+        [self->_editState discard];
         proceed();
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -432,7 +417,7 @@ static NSData *wqh_parse_hex(NSString *text)
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Find" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSString *t = a.textFields.firstObject.text ?: @"";
-        NSData *needle = hex ? wqh_parse_hex(t) : [t dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *needle = hex ? WQParseHex(t, NO) : [t dataUsingEncoding:NSUTF8StringEncoding];
         if (needle.length == 0) { wqh_alert(self, @"Nothing to find", hex ? @"Enter hex bytes, e.g. de ad be ef." : @"Enter some text."); return; }
         NSIndexPath *top = self.tableView.indexPathsForVisibleRows.firstObject;
         unsigned long long from = self->_matchLength ? self->_matchOffset + 1 : (unsigned long long)top.row * self->_perRow;

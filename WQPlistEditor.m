@@ -7,6 +7,7 @@
 
 #import "WQPlistEditor.h"
 #import "WQAccess.h"
+#import "WQCore.h"
 
 typedef NS_ENUM(NSInteger, WQPType) {
     WQPTypeString, WQPTypeInteger, WQPTypeReal, WQPTypeBoolean, WQPTypeDate, WQPTypeData,
@@ -51,24 +52,6 @@ static NSString *wqp_hex(NSData *data, NSUInteger max)
     for (NSUInteger i = 0; i < n; i++) [s appendFormat:i ? @" %02x" : @"%02x", b[i]];
     if (data.length > max) [s appendString:@" …"];
     return s;
-}
-
-static NSData *wqp_parse_hex(NSString *text)
-{
-    NSMutableString *digits = [NSMutableString new];
-    for (NSUInteger i = 0; i < text.length; i++) {
-        unichar c = [text characterAtIndex:i];
-        if ([NSCharacterSet.whitespaceAndNewlineCharacterSet characterIsMember:c] || c == '<' || c == '>') continue;
-        if (!isxdigit(c)) return nil;
-        [digits appendFormat:@"%C", c];
-    }
-    if (digits.length % 2) return nil;
-    NSMutableData *out = [NSMutableData dataWithCapacity:digits.length / 2];
-    for (NSUInteger i = 0; i < digits.length; i += 2) {
-        uint8_t byte = (uint8_t)strtoul([digits substringWithRange:NSMakeRange(i, 2)].UTF8String, NULL, 16);
-        [out appendBytes:&byte length:1];
-    }
-    return out;
 }
 
 static NSISO8601DateFormatter *wqp_dates(void)
@@ -124,10 +107,8 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 @property (nonatomic, copy) NSString *path;
 @property (nonatomic, strong) id root;
 @property (nonatomic) NSPropertyListFormat format;
-@property (nonatomic) BOOL dirty;
 @property (nonatomic) BOOL readOnly;
-@property (nonatomic) BOOL saving;
-@property (nonatomic) NSUInteger revision;
+@property (nonatomic, strong) WQEditState *edit;
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *version;
 @end
 
@@ -152,6 +133,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
         _doc = [WQPlistDocument new];
         _doc.path = path;
         _doc.readOnly = readOnly;
+        _doc.edit = [WQEditState new];
         _isRoot = YES;
         _status = @"Loading…";
         self.title = path.lastPathComponent;
@@ -248,16 +230,16 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     if (!self.doc.readOnly && self.container) {
         UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithTitle:@"Save" style:UIBarButtonItemStyleDone
                                                                 target:self action:@selector(save)];
-        save.enabled = self.doc.dirty && !self.doc.saving;
+        save.enabled = self.doc.edit.dirty && !self.doc.edit.saving;
         [items addObject:save];
         UIBarButtonItem *add = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
                                                                               target:self action:@selector(add)];
-        add.enabled = !self.doc.saving;
+        add.enabled = !self.doc.edit.saving;
         [items addObject:add];
     }
     NSMutableArray *menu = [NSMutableArray array];
     __weak typeof(self) weakSelf = self;
-    if (self.isArray && !self.doc.readOnly && !self.doc.saving && self.container) {
+    if (self.isArray && !self.doc.readOnly && !self.doc.edit.saving && self.container) {
         [menu addObject:[UIAction actionWithTitle:self.tableView.editing ? @"Done Reordering" : @"Reorder Items"
                                             image:[UIImage systemImageNamed:@"arrow.up.arrow.down"] identifier:nil
                                           handler:^(UIAction *__unused a) {
@@ -279,7 +261,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (BOOL)wq_needsLeaveConfirmation
 {
-    return self.doc.dirty || self.doc.saving;
+    return self.doc.edit.dirty || self.doc.edit.saving;
 }
 
 - (void)leave
@@ -289,7 +271,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (BOOL)blockWhileSaving
 {
-    if (!self.doc.saving) return NO;
+    if (!self.doc.edit.saving) return NO;
     wqp_alert(self, @"Save in progress", @"Wait for the current save to finish before leaving or making more changes.");
     return YES;
 }
@@ -308,12 +290,12 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
             [nav popToViewController:nav.viewControllers[rootIndex - 1] animated:then == nil];
         if (then) then();
     };
-    if (!self.doc.dirty) { go(); return; }
+    if (!self.doc.edit.dirty) { go(); return; }
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your edits to this property list have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
-        self.doc.dirty = NO;
+        [self.doc.edit discard];
         go();
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -323,12 +305,12 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 - (void)confirmLeaveThen:(void (^)(void))proceed
 {
     if ([self blockWhileSaving]) return;
-    if (!self.doc.dirty) { proceed(); return; }
+    if (!self.doc.edit.dirty) { proceed(); return; }
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your edits to this property list have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
-        self.doc.dirty = NO;
+        [self.doc.edit discard];
         proceed();
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -336,7 +318,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (void)save
 {
-    if ([self blockWhileSaving] || !self.doc.dirty) return;
+    if ([self blockWhileSaving] || !self.doc.edit.dirty) return;
     WQPlistDocument *doc = self.doc;
     NSError *error = nil;
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:doc.root format:doc.format options:0 error:&error];
@@ -352,18 +334,14 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
-        NSUInteger savedRevision = doc.revision;
-        doc.saving = YES;
+        NSUInteger savedRevision = [doc.edit beginSave];
         [self refresh];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSString *writeError = nil;
             BOOL ok = wq_write_if_unchanged(doc.path, data, doc.version, &writeError);
             dispatch_async(dispatch_get_main_queue(), ^{
-                doc.saving = NO;
-                if (ok) {
-                    doc.version = wq_file_version(doc.path);
-                    if (doc.revision == savedRevision) doc.dirty = NO;
-                }
+                [doc.edit finishSave:ok revision:savedRevision];
+                if (ok) doc.version = wq_file_version(doc.path);
                 [self refresh];
                 if (!ok) wqp_alert(self, @"Save failed", wq_permission_hint(doc.path, YES) ?: writeError ?: @"Unknown error");
             });
@@ -374,9 +352,8 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (void)changed
 {
-    if (self.doc.saving) return;
-    self.doc.revision++;
-    self.doc.dirty = YES;
+    if (self.doc.edit.saving) return;
+    [self.doc.edit noteChange];
     [self refresh];
 }
 
@@ -427,7 +404,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     } else if (t == WQPTypeBoolean) {
         UISwitch *sw = [UISwitch new];
         sw.on = [value boolValue];
-        sw.enabled = !self.doc.readOnly && !self.doc.saving;
+        sw.enabled = !self.doc.readOnly && !self.doc.edit.saving;
         sw.tag = indexPath.row;
         [sw addTarget:self action:@selector(boolChanged:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = sw;
@@ -454,7 +431,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
         [self.navigationController pushViewController:child animated:YES];
         return;
     }
-    if (t == WQPTypeBoolean || self.doc.readOnly || self.doc.saving) return;
+    if (t == WQPTypeBoolean || self.doc.readOnly || self.doc.edit.saving) return;
     NSInteger row = indexPath.row;
     [self editValueOfType:t current:value title:name done:^(id newValue) {
         [self setValue:newValue at:row];
@@ -508,7 +485,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
                 break;
             }
             case WQPTypeDate: value = [wqp_dates() dateFromString:text]; break;
-            case WQPTypeData: value = wqp_parse_hex(text); break;
+            case WQPTypeData: value = WQParseHex(text, YES); break;
             default: break;
         }
         if (!value) { wqp_alert(self, @"Not a valid value", [NSString stringWithFormat:@"Expected: %@", hint ?: wqp_type_name(t)]); return; }
@@ -521,7 +498,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (void)add
 {
-    if (self.doc.saving) return;
+    if (self.doc.edit.saving) return;
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add" message:@"Type of the new value"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     for (WQPType t = WQPTypeString; t <= WQPTypeArray; t++) {
@@ -576,7 +553,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
     trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    if (self.doc.readOnly || self.doc.saving) return nil;
+    if (self.doc.readOnly || self.doc.edit.saving) return nil;
     NSInteger row = indexPath.row;
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:@"Delete"
         handler:^(UIContextualAction *__unused action, UIView *__unused view, void (^completion)(BOOL)) {
@@ -603,7 +580,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (BOOL)tableView:(UITableView *)tableView canMoveRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    return self.isArray && !self.doc.readOnly && !self.doc.saving;
+    return self.isArray && !self.doc.readOnly && !self.doc.edit.saving;
 }
 
 - (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath
@@ -618,12 +595,11 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (void)tableView:(UITableView *)tableView moveRowAtIndexPath:(NSIndexPath *)from toIndexPath:(NSIndexPath *)to
 {
-    if (self.doc.saving) return;
+    if (self.doc.edit.saving) return;
     id v = self.container[(NSUInteger)from.row];
     [self.container removeObjectAtIndex:(NSUInteger)from.row];
     [self.container insertObject:v atIndex:(NSUInteger)to.row];
-    self.doc.revision++;
-    self.doc.dirty = YES;
+    [self.doc.edit noteChange];
     dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; });
 }
 

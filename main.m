@@ -13,6 +13,7 @@
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import "WQAccess.h"
+#import "WQCore.h"
 #import "WQPlistEditor.h"
 #import "WQHexViewer.h"
 
@@ -379,9 +380,7 @@ typedef NS_ENUM(NSInteger, WQViewKind) { WQViewText, WQViewPlist, WQViewImage, W
     WQViewKind _kind;
     NSPropertyListFormat _plistFormat;
     BOOL _truncated;
-    BOOL _dirty;
-    BOOL _saving;
-    NSUInteger _revision;
+    WQEditState *_editState;
     NSDictionary<NSString *, NSNumber *> *_version;
 }
 
@@ -392,6 +391,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
 {
     if ((self = [super initWithNibName:nil bundle:nil])) {
         _path = [path copy];
+        _editState = [WQEditState new];
         self.title = path.lastPathComponent;
     }
     return self;
@@ -541,7 +541,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
 {
     _editButton.title = _textView.editable ? @"Save" : @"Edit";
     _editButton.style = _textView.editable ? UIBarButtonItemStyleDone : UIBarButtonItemStylePlain;
-    _editButton.enabled = !_saving;
+    _editButton.enabled = !_editState.saving;
 }
 
 - (void)enableEditing
@@ -555,33 +555,31 @@ static const NSUInteger kHexLimit = 64 * 1024;
 
 - (void)textViewDidChange:(UITextView *)textView
 {
-    if (_saving) return;
-    _revision++;
-    _dirty = YES;
+    if (_editState.saving) return;
+    [_editState noteChange];
 }
 
 - (BOOL)blockWhileSaving
 {
-    if (!_saving) return NO;
+    if (!_editState.saving) return NO;
     wq_alert(self, @"Save in progress", @"Wait for the current save to finish before leaving or making more changes.");
     return YES;
 }
 
 - (BOOL)wq_needsLeaveConfirmation
 {
-    return _dirty || _saving;
+    return _editState.dirty || _editState.saving;
 }
 
 - (void)confirmLeaveThen:(void (^)(void))proceed
 {
     if ([self blockWhileSaving]) return;
-    if (!_dirty) { proceed(); return; }
+    if (!_editState.dirty) { proceed(); return; }
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your text changes have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
-        self->_dirty = NO;
-        self->_revision++;
+        [self->_editState discard];
         self->_textView.editable = NO;
         [self->_textView resignFirstResponder];
         [self updateEditButton];
@@ -604,7 +602,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
         [_textView becomeFirstResponder];
         return;
     }
-    if (!_dirty) {
+    if (!_editState.dirty) {
         _textView.editable = NO;
         [_textView resignFirstResponder];
         [self updateEditButton];
@@ -636,8 +634,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
                                                               preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
-        NSUInteger savedRevision = self->_revision;
-        self->_saving = YES;
+        NSUInteger savedRevision = [self->_editState beginSave];
         self->_textView.editable = NO;
         [self->_textView resignFirstResponder];
         [self updateEditButton];
@@ -647,12 +644,9 @@ static const NSUInteger kHexLimit = 64 * 1024;
             BOOL ok = wq_write_if_unchanged(path, newData, self->_version, &error);
             NSDictionary *newVersion = ok ? wq_file_version(path) : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
-                self->_saving = NO;
-                if (ok) {
-                    self->_version = newVersion;
-                    if (self->_revision == savedRevision) self->_dirty = NO;
-                }
-                self->_textView.editable = self->_dirty;
+                [self->_editState finishSave:ok revision:savedRevision];
+                if (ok) self->_version = newVersion;
+                self->_textView.editable = self->_editState.dirty;
                 [self updateEditButton];
                 if (!ok) wq_alert(self, @"Save failed", error ?: wq_permission_hint(path, YES) ?: @"Unknown error");
             });
@@ -2448,10 +2442,12 @@ static NSString *wq_recover_interrupted_restore(void)
     // backup must also be absent afterwards, not silently survive the restore.
     error = nil;
     BOOL ok = YES;
+    NSDictionary *restorePlan = WQRestorePlan([parts containsObject:@"Documents"],
+                                               [parts containsObject:@"Library"]);
     for (NSString *part in @[@"Documents", @"Library"]) {
         NSString *src = [backup stringByAppendingPathComponent:part];
         NSString *dst = [app.container stringByAppendingPathComponent:part];
-        if ([parts containsObject:part]) {
+        if ([restorePlan[part] boolValue]) {
             if (!wq_replace_part(src, dst, &error)) { ok = NO; break; }
         } else {
             unsigned long long ignored = 0;

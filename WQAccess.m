@@ -13,6 +13,7 @@
 //
 
 #import "WQAccess.h"
+#import "WQCore.h"
 #import <dlfcn.h>
 #import <errno.h>
 #import <fcntl.h>
@@ -613,7 +614,7 @@ BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *r
     unsigned long long size = (unsigned long long)before.st_size;
     for (NSNumber *off in runs) {
         unsigned long long start = off.unsignedLongLongValue;
-        if (start > size || runs[off].length > size - start) {
+        if (!WQPatchRangeValid(start, runs[off].length, size)) {
             if (errorText) *errorText = @"A change lies past the end of the file";
             return NO;
         }
