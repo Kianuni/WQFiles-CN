@@ -162,7 +162,7 @@ static inline BOOL WQAbsolutePathGrammar(NSString *path)
     return YES;
 }
 
-static inline int WQCreateDirectoriesNoLinks(NSString *path)
+static inline int WQCreateDirectoriesNoLinksMode(NSString *path, mode_t mode)
 {
     path = WQCanonicalVarPath(path);
     if (!WQAbsolutePathGrammar(path)) { errno = EINVAL; return -1; }
@@ -172,7 +172,7 @@ static inline int WQCreateDirectoriesNoLinks(NSString *path)
         if (!part.length) continue;
         int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (next < 0 && errno == ENOENT) {
-            if (mkdirat(fd, part.fileSystemRepresentation, 0700) != 0 && errno != EEXIST) { int err = errno; close(fd); errno = err; return -1; }
+            if (mkdirat(fd, part.fileSystemRepresentation, mode) != 0 && errno != EEXIST) { int err = errno; close(fd); errno = err; return -1; }
             if (fsync(fd) != 0) { int err = errno; close(fd); errno = err; return -1; }
             next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         }
@@ -182,6 +182,11 @@ static inline int WQCreateDirectoriesNoLinks(NSString *path)
         fd = next;
     }
     return fd;
+}
+
+static inline int WQCreateDirectoriesNoLinks(NSString *path)
+{
+    return WQCreateDirectoriesNoLinksMode(path, 0700);
 }
 
 static inline BOOL WQBackupStampValid(NSString *stamp)

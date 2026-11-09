@@ -18,3 +18,7 @@ xcrun --sdk macosx clang -fobjc-arc -fmodules -fmodules-cache-path="$OUT/ModuleC
     -Wall -Wextra -Werror -I. tests/WQAccessTreeTests.m WQCore.m \
     -framework Foundation -o "$OUT/WQAccessTreeTests"
 "$OUT/WQAccessTreeTests"
+xcrun --sdk macosx clang -fobjc-arc -fmodules -fmodules-cache-path="$OUT/ModuleCache" -isysroot "$SDK" \
+    -Wall -Wextra -Werror -I. tests/WQAccessCopyTests.m WQCore.m \
+    -framework Foundation -o "$OUT/WQAccessCopyTests"
+"$OUT/WQAccessCopyTests"

@@ -285,16 +285,6 @@ NSString *wq_backup_root(void)
     return [docs stringByAppendingPathComponent:@"Backups"];
 }
 
-static BOOL wq_is_own(NSString *path)
-{
-    NSString *home = wq_norm(NSHomeDirectory());
-    NSString *p = wq_norm(path);
-    if ([p hasPrefix:[home stringByAppendingString:@"/"]]) return YES;
-    NSString *group = wq_app_group();
-    NSURL *groupRoot = group ? [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group] : nil;
-    return groupRoot && [p hasPrefix:[wq_norm(groupRoot.path) stringByAppendingString:@"/"]];
-}
-
 static int wq_open(NSString *path, int flags, mode_t mode);
 
 // Copies everything from fd `in` to fd `out` in chunks; fsyncs `out`.
@@ -319,21 +309,6 @@ static BOOL wq_stream(int in, int out, NSString **errorText)
     }
     free(buf);
     if (ok && fsync(out) != 0) { ok = NO; if (errorText) *errorText = wq_errno(errno); }
-    return ok;
-}
-
-// Copies a file from anywhere (access is asked for) to `dest`, which must not
-// exist yet and is created exclusively. A partial copy is removed.
-static BOOL wq_copy_file_out(NSString *path, NSString *dest, NSString **errorText)
-{
-    int in = wq_open(path, O_RDONLY, 0);
-    if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
-    int out = open(dest.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (out < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
-    BOOL ok = wq_stream(in, out, errorText);
-    close(in);
-    if (close(out) != 0 && ok) { ok = NO; if (errorText) *errorText = wq_errno(errno); }
-    if (!ok) unlink(dest.fileSystemRepresentation);
     return ok;
 }
 
@@ -663,8 +638,48 @@ BOOL wq_create_file_from(NSString *path, NSString *source, NSString **errorText)
 
 BOOL wq_copy_to_local(NSString *path, NSString *dest, NSString **errorText)
 {
-    unlink(dest.fileSystemRepresentation);
-    return wq_copy_file_out(path, dest, errorText);
+    if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path)) || !WQAbsolutePathGrammar(WQCanonicalVarPath(dest))) {
+        if (errorText) *errorText = @"Invalid copy path";
+        return NO;
+    }
+    int in = wq_open(path, O_RDONLY, 0);
+    if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    struct stat source, destination;
+    if (fstat(in, &source) != 0) { close(in); return NO; }
+    // stat intentionally follows a destination alias for this identity check.
+    if (stat(dest.fileSystemRepresentation, &destination) == 0 && WQSameObject(&source, &destination)) {
+        close(in); if (errorText) *errorText = @"Source and destination are the same file"; return NO;
+    }
+    int parent = WQOpenDirectoryNoLinks(dest.stringByDeletingLastPathComponent);
+    if (parent < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
+    NSString *stage = [@".wq-local-copy-" stringByAppendingString:NSUUID.UUID.UUIDString];
+    int out = WQOpenRegularAt(parent, stage.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (out < 0) { if (errorText) *errorText = wq_errno(errno); close(parent); close(in); return NO; }
+    BOOL ok = wq_stream(in, out, errorText);
+    struct stat after;
+    if (ok && (fstat(in, &after) != 0 || ![wq_version_for_stat(&source) isEqualToDictionary:wq_version_for_stat(&after)])) {
+        ok = NO; if (errorText) *errorText = @"The source changed while it was copied";
+    }
+    close(in);
+    if (close(out) != 0 && ok) { ok = NO; if (errorText) *errorText = wq_errno(errno); }
+    // Recheck aliases after the potentially long stream, still before replacing.
+    if (ok && fstatat(parent, dest.lastPathComponent.fileSystemRepresentation, &destination, 0) == 0 && WQSameObject(&source, &destination)) {
+        ok = NO; if (errorText) *errorText = @"Source and destination are the same file";
+    }
+    if (ok) {
+        struct stat entry;
+        if (fstatat(parent, dest.lastPathComponent.fileSystemRepresentation, &entry, AT_SYMLINK_NOFOLLOW) == 0 &&
+            !S_ISREG(entry.st_mode) && !S_ISLNK(entry.st_mode)) {
+            ok = NO; if (errorText) *errorText = @"Destination is not a regular file";
+        }
+    }
+    if (ok && renameat(parent, stage.fileSystemRepresentation, parent, dest.lastPathComponent.fileSystemRepresentation) != 0) {
+        ok = NO; if (errorText) *errorText = wq_errno(errno);
+    }
+    if (ok && fsync(parent) != 0) { ok = NO; if (errorText) *errorText = wq_errno(errno); }
+    if (!ok) unlinkat(parent, stage.fileSystemRepresentation, 0);
+    close(parent);
+    return ok;
 }
 
 NSString *wq_permission_hint(NSString *path, BOOL forWriting)
@@ -1017,43 +1032,122 @@ BOOL wq_purge_contents(NSString *dir, unsigned long long *freed)
     return ok;
 }
 
+// Flush a completed staging tree without following any links or opening special
+// files. This does not claim to snapshot a concurrently changing source tree.
+static BOOL wq_sync_entry(int parent, NSString *name)
+{
+    struct stat st;
+    if (fstatat(parent, name.fileSystemRepresentation, &st, AT_SYMLINK_NOFOLLOW) != 0) return NO;
+    if (S_ISLNK(st.st_mode)) return YES;
+    if (S_ISREG(st.st_mode)) {
+        int fd = WQOpenRegularAt(parent, name.fileSystemRepresentation, O_RDONLY, 0);
+        if (fd < 0) return NO;
+        struct stat current;
+        BOOL ok = fstat(fd, &current) == 0 && WQSameObject(&st, &current) && fsync(fd) == 0;
+        close(fd); return ok;
+    }
+    if (!S_ISDIR(st.st_mode)) { errno = EINVAL; return NO; }
+    int fd = openat(parent, name.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return NO;
+    int listing = dup(fd);
+    DIR *dir = listing >= 0 ? fdopendir(listing) : NULL;
+    if (!dir) { if (listing >= 0) close(listing); close(fd); return NO; }
+    BOOL ok = YES;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { if (errno) ok = NO; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        NSString *child = [NSFileManager.defaultManager stringWithFileSystemRepresentation:entry->d_name length:strlen(entry->d_name)];
+        if (!child || !wq_sync_entry(fd, child)) { ok = NO; break; }
+    }
+    if (closedir(dir) != 0) ok = NO;
+    if (ok && fsync(fd) != 0) ok = NO;
+    close(fd);
+    return ok;
+}
+
 BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString **errorText)
 {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    if (!wq_is_own(srcDir)) wq_grant(srcDir);
-    if (!wq_is_own(dstDir)) wq_grant(dstDir);
-    NSError *error = nil;
-    if (![fm createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:&error]) {
-        if (errorText) *errorText = error.localizedDescription ?: @"Cannot create the destination folder";
+    srcDir = WQCanonicalVarPath(srcDir);
+    dstDir = WQCanonicalVarPath(dstDir);
+    if (!WQAbsolutePathGrammar(srcDir) || !WQAbsolutePathGrammar(dstDir) || [srcDir isEqual:dstDir] ||
+        [srcDir hasPrefix:[dstDir stringByAppendingString:@"/"]] || [dstDir hasPrefix:[srcDir stringByAppendingString:@"/"]]) {
+        if (errorText) *errorText = @"Source and destination trees overlap or have invalid paths";
         return NO;
     }
+    NSFileManager *fm = NSFileManager.defaultManager;
+    int source = wq_open_directory(srcDir);
+    if (source < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    int destination = WQCreateDirectoriesNoLinksMode(dstDir, 0755);
+    if (destination < 0 && wq_is_denied(errno) && wq_grant(dstDir.stringByDeletingLastPathComponent))
+        destination = WQCreateDirectoriesNoLinksMode(dstDir, 0755);
+    struct stat srcStat, dstStat;
+    if (destination < 0 || fstat(source, &srcStat) != 0 || fstat(destination, &dstStat) != 0 || WQSameObject(&srcStat, &dstStat)) {
+        if (errorText) *errorText = @"Cannot safely open distinct source and destination folders";
+        close(source); if (destination >= 0) close(destination); return NO;
+    }
+    NSError *error = nil;
     NSArray *children = [fm contentsOfDirectoryAtPath:srcDir error:&error];
     if (!children) {
         if (errorText) *errorText = error.localizedDescription ?: @"Cannot read the source folder";
-        return NO;
+        close(source); close(destination); return NO;
     }
     BOOL allOk = YES;
     NSString *firstFailure = nil;
     for (NSString *name in children) {
+        if (!wq_directory_current(srcDir, source) || !wq_directory_current(dstDir, destination)) {
+            allOk = NO; firstFailure = firstFailure ?: @"A copy root changed during copying"; break;
+        }
         NSString *src = [srcDir stringByAppendingPathComponent:name];
         NSString *dst = [dstDir stringByAppendingPathComponent:name];
-        [fm removeItemAtPath:dst error:nil];
-        NSError *copyError = nil;
-        BOOL ok = [fm copyItemAtPath:src toPath:dst error:&copyError];
-        if (!ok && wq_grant(src)) {
-            // copyItemAtPath can leave a partial destination. Retrying over it
-            // would fail with "already exists" and hide the original problem.
-            [fm removeItemAtPath:dst error:nil];
-            NSError *retryError = nil;
-            ok = [fm copyItemAtPath:src toPath:dst error:&retryError];
-            if (!ok) wq_log(@"copy retry: %@ -> %@: %@", src, dst, retryError.localizedDescription);
+        NSString *stageName = [@".wq-copy-stage-" stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSString *stagePath = [dstDir stringByAppendingPathComponent:stageName];
+        if (mkdirat(destination, stageName.fileSystemRepresentation, 0700) != 0) {
+            allOk = NO; firstFailure = firstFailure ?: wq_errno(errno); continue;
         }
-        if (!ok) {
+        int stage = openat(destination, stageName.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (stage < 0) { allOk = NO; firstFailure = firstFailure ?: wq_errno(errno); continue; }
+        NSString *newPath = [stagePath stringByAppendingPathComponent:@"New"];
+        WQ_TREE_HOOK(@"copyReady", src);
+        NSError *copyError = nil;
+        BOOL ok = wq_directory_current(stagePath, stage) && [fm copyItemAtPath:src toPath:newPath error:&copyError];
+        if (!ok && wq_grant(src) && wq_directory_current(srcDir, source) && wq_directory_current(stagePath, stage)) {
+            if (wq_remove_entry(stage, @"New", newPath, NULL)) {
+                NSError *retryError = nil;
+                ok = [fm copyItemAtPath:src toPath:newPath error:&retryError];
+                if (!ok) copyError = retryError ?: copyError;
+            }
+        }
+        if (ok) ok = wq_sync_entry(stage, @"New") && fsync(stage) == 0;
+        WQ_TREE_HOOK(@"copyStaged", dst);
+        if (ok) ok = wq_directory_current(srcDir, source) && wq_directory_current(dstDir, destination) && wq_directory_current(stagePath, stage);
+        BOOL installed = NO;
+        if (ok) {
+            struct stat previous;
+            BOOL exists = fstatat(destination, name.fileSystemRepresentation, &previous, AT_SYMLINK_NOFOLLOW) == 0;
+            if (!exists && errno != ENOENT) ok = NO;
+            if (ok) {
+                // Swap retains the previous destination at stage/New until the
+                // copy has completed and the new namespace has been flushed.
+                installed = renameatx_np(stage, "New", destination, name.fileSystemRepresentation, exists ? RENAME_SWAP : RENAME_EXCL) == 0;
+                ok = installed && fsync(destination) == 0 && fsync(stage) == 0;
+            }
+        }
+        NSString *failure = ok ? nil : copyError.localizedDescription ?: wq_errno(errno);
+        // Never erase the preserved destination if installation durability failed.
+        BOOL cleaned = !installed || ok;
+        if (cleaned) cleaned = wq_remove_entry(stage, @"New", newPath, NULL);
+        close(stage);
+        if (cleaned) cleaned = unlinkat(destination, stageName.fileSystemRepresentation, AT_REMOVEDIR) == 0 && fsync(destination) == 0;
+        if (!ok || !cleaned) {
             allOk = NO;
-            firstFailure = firstFailure ?: copyError.localizedDescription ?: @"Copy failed";
-            wq_log(@"copy: %@ -> %@: %@", src, dst, copyError.localizedDescription);
+            NSString *message = cleaned ? failure : [NSString stringWithFormat:@"%@; staging/recovery contents retained at %@", failure ?: wq_errno(errno), stagePath];
+            firstFailure = firstFailure ?: message;
+            wq_log(@"copy: %@ -> %@: %@", src, dst, message);
         }
     }
+    close(source); close(destination);
     if (errorText && !allOk) *errorText = firstFailure;
     wq_log(@"copy: %@ -> %@ (%lu items) %@", srcDir, dstDir, (unsigned long)children.count, allOk ? @"OK" : @"with errors");
     return allOk;

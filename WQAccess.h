@@ -48,7 +48,8 @@ BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary<NSString *
 // files; nothing is held in memory). A failed create leaves no partial file.
 BOOL wq_write_from_file(NSString *path, NSString *source, NSString *_Nullable *_Nullable errorText);
 BOOL wq_create_file_from(NSString *path, NSString *source, NSString *_Nullable *_Nullable errorText);
-// Streams a file from anywhere into a local path (replaced if it exists).
+// Streams a regular file into a staged local path, then replaces the destination.
+// Same-file aliases are refused; failed streaming leaves the destination intact.
 BOOL wq_copy_to_local(NSString *path, NSString *dest, NSString *_Nullable *_Nullable errorText);
 
 // When Unix permissions (not the sandbox) keep this app out of `path`: an
@@ -100,6 +101,8 @@ unsigned long long wq_dir_size(NSString *dir);
 BOOL wq_purge_contents(NSString *dir, unsigned long long *freed);
 
 // Copies every item inside srcDir into dstDir (replacing same-named items).
+// Each child is staged/flushed before installation; old children survive failed
+// copies. This is not an all-children transaction: callers still own tree rollback.
 // Either side may be another app's container. Returns NO if anything failed.
 BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString *_Nullable *_Nullable errorText);
 
