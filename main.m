@@ -878,7 +878,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             [actions addObject:[UIAction actionWithTitle:@"Copy Identifier" image:[UIImage systemImageNamed:@"tag"]
                                               identifier:nil handler:^(UIAction *__unused a) {
                 WQItem *latest = currentItem();
-                if (latest) UIPasteboard.generalPasteboard.string = latest.label;
+                if (latest) UIPasteboard.generalPasteboard.string = latest.bundleID ?: latest.label;
             }]];
         }
         if (!weakSelf.readOnly) {
