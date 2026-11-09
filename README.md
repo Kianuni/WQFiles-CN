@@ -73,12 +73,33 @@ keep the durable backups. Recovery fails closed when required safety material is
 missing. Generic overwrite/delete operations on backup-storage files are refused
 to avoid recursively backing up backups; valid backups can still be restored.
 App backups live in **App Backups** (also in the Files app); old ones are never
-pruned automatically and can only be removed with the explicit **Delete
-Backup** action. Automatic pruning is intentionally left out so a safety copy
-is never discarded without a user decision.
+pruned automatically. Tap **Select** in **Backups** or **App Backups** to
+choose one or more complete backup folders and delete them together; a single
+folder can still be removed with **Delete Backup**. Automatic pruning is
+intentionally left out so a safety copy is never discarded without a user
+decision.
 
 Editing another app's or the system's files can break things. Keep the backups
 and only change what you understand.
+
+## Troubleshooting
+
+- **Apps list is empty**: the Apps screen depends on a full `fsgetpath` scan of
+  the data volume. A missing/denied container parent, an unavailable inode
+  probe, or an exhausted scan bound is logged as `enumerate: …` and
+  `app scan: …` in **Log**. The current build only treats a *missing* parent as
+  failure; a denied parent and a completion-probe miss still return the
+  scanned subset, so refresh instead of assuming there are no apps.
+- **`NO TOKEN`**: the container path was visible but `wq_grant` could not
+  obtain a sandbox token. Common causes are a signer that dropped the App
+  Group, an app-group cache-swap failure, or a container the app-group query
+  refuses. See the `grant failed`/`enumerate` lines in **Log**.
+- **`(no label)`**: a token was obtained, but the container identifier
+  (`com.apple.containermanager.identifier` xattr or the container metadata
+  plist) could not be read. System/daemon containers often have no identifier;
+  for app containers this usually means the xattr is unavailable or the
+  metadata plist is root-only. The folder remains browsable, but apps with no
+  identifier cannot be backed up or cleared until identity is available.
 
 ## Install with AltStore or SideStore
 

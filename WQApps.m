@@ -463,6 +463,8 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
                     [self.tableView reloadData];
                 });
             });
+        if (!containers) wq_log(@"app scan: container enumeration failed; see the preceding enumerate log");
+        else if (containers.count == 0) wq_log(@"app scan: enumeration returned no container paths; check the base path and inode bound");
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
         NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0, sizeLimited = 0;
         for (NSString *c in containers) {
@@ -513,8 +515,8 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
         NSString *note = nil;
-        if (!containers) note = @"Container enumeration failed. Check the App Group and see Log.";
-        else if (!containers.count) note = @"No app containers were found. Check the App Group and see Log.";
+        if (!containers) note = @"Container enumeration failed. See Log for the statfs/inode reason.";
+        else if (!containers.count) note = @"No app containers were found. Refresh, and check Log for the enumeration reason.";
         else if (limited || sizeLimited) note = [NSString stringWithFormat:@"%lu containers · %lu with limited access, identity, size, or no identifier. See Log.",
                                                  (unsigned long)apps.count, (unsigned long)(limited + sizeLimited)];
         dispatch_async(dispatch_get_main_queue(), ^{

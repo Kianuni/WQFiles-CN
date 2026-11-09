@@ -82,9 +82,13 @@ BOOL wq_create_dir(NSString *path, NSString *_Nullable *_Nullable errorText);
 
 // Deletes a file (backed up first) or an empty folder.
 BOOL wq_delete(NSString *path, NSString *_Nullable *_Nullable errorText);
-// Explicit, user-confirmed removal of an app backup folder. Unlike wq_delete,
-// this is allowed inside AppBackups, but only for a bundle or date folder
-// directly below the app backup root. No safety copy is made.
+// YES for a folder that represents one backup unit: a stamp directly under
+// the file backup root, or a bundle/date folder directly under the app backup
+// root. Used by the backup browser's multi-selection.
+BOOL wq_backup_unit_deletable(NSString *path);
+// Explicit, user-confirmed removal of one backup unit. Unlike wq_delete, this
+// is allowed inside a backup store and removes the whole subtree. No safety
+// copy is made.
 BOOL wq_delete_backup(NSString *path, NSString *_Nullable *_Nullable errorText);
 BOOL wq_rename(NSString *path, NSString *newName, NSString *_Nullable *_Nullable errorText);
 

@@ -984,25 +984,31 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
     return wq_patch_if_unchanged(path, runs, nil, errorText);
 }
 
-BOOL wq_delete_backup(NSString *path, NSString **errorText)
+BOOL wq_backup_unit_deletable(NSString *path)
 {
-    NSString *root = WQCanonicalVarPath(wq_app_backup_root());
     NSString *canonical = WQCanonicalVarPath(path);
-    if (!root.length || !WQAbsolutePathGrammar(canonical) ||
-        ![canonical hasPrefix:[root stringByAppendingString:@"/"]]) {
-        if (errorText) *errorText = @"The path is not inside the app backup store.";
-        return NO;
-    }
+    if (!WQAbsolutePathGrammar(canonical) || [canonical.lastPathComponent hasPrefix:@"."]) return NO;
     NSString *parentPath = canonical.stringByDeletingLastPathComponent;
     NSString *grandparentPath = parentPath.stringByDeletingLastPathComponent;
-    if (![parentPath isEqualToString:root] && ![grandparentPath isEqualToString:root]) {
-        if (errorText) *errorText = @"Only a backup bundle or date folder can be deleted.";
+    NSString *fileRoot = WQCanonicalVarPath(wq_backup_root());
+    NSString *appRoot = WQCanonicalVarPath(wq_app_backup_root());
+    if (fileRoot.length &&
+        [canonical hasPrefix:[fileRoot stringByAppendingString:@"/"]] &&
+        [parentPath isEqualToString:fileRoot]) return YES;
+    if (appRoot.length &&
+        [canonical hasPrefix:[appRoot stringByAppendingString:@"/"]] &&
+        ([parentPath isEqualToString:appRoot] || [grandparentPath isEqualToString:appRoot])) return YES;
+    return NO;
+}
+
+BOOL wq_delete_backup(NSString *path, NSString **errorText)
+{
+    if (!wq_backup_unit_deletable(path)) {
+        if (errorText) *errorText = @"Only a complete backup unit can be deleted here.";
         return NO;
     }
-    if ([canonical.lastPathComponent hasPrefix:@"."]) {
-        if (errorText) *errorText = @"Hidden backup folders cannot be deleted here.";
-        return NO;
-    }
+    NSString *canonical = WQCanonicalVarPath(path);
+    NSString *parentPath = canonical.stringByDeletingLastPathComponent;
     int parent = wq_open_directory_flags(parentPath, O_SEARCH);
     if (parent < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
     const char *name = canonical.lastPathComponent.fileSystemRepresentation;
@@ -1188,30 +1194,39 @@ static int64_t wq_volume_max_inode(fsid_t fsid, int64_t *probeInode)
 #ifdef WQ_ACCESS_TESTING
     if (wq_test_volume_limit >= 0) return wq_test_volume_limit;
 #endif
-    NSString *probe = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                       [NSString stringWithFormat:@"wq-inode-%u", arc4random()]];
-    int fd = open(probe.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0) {
-        wq_log(@"inode probe: cannot create %@ (%@)", probe, wq_errno(errno));
-        return 0;
+    NSArray<NSString *> *directories = @[
+        NSTemporaryDirectory() ?: @"",
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
+        [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject] ?: @"",
+    ];
+    for (NSString *directory in directories) {
+        if (!directory.length) continue;
+        NSString *probe = [directory stringByAppendingPathComponent:
+                           [NSString stringWithFormat:@"wq-inode-%u", arc4random()]];
+        int fd = open(probe.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        if (fd < 0) {
+            wq_log(@"inode probe: cannot create %@ (%@)", probe, wq_errno(errno));
+            continue;
+        }
+        struct stat st = {0};
+        struct statfs sfs = {0};
+        BOOL ok = fstat(fd, &st) == 0 && fstatfs(fd, &sfs) == 0;
+        int err = errno;
+        close(fd);
+        unlink(probe.fileSystemRepresentation);
+        if (!ok) {
+            wq_log(@"inode probe: cannot inspect %@ (%@)", probe, wq_errno(err));
+            continue;
+        }
+        if (memcmp(&sfs.f_fsid, &fsid, sizeof(fsid)) != 0) {
+            wq_log(@"inode probe: %@ is on a different volume", probe);
+            continue;
+        }
+        if ((uint64_t)st.st_ino > (uint64_t)INT64_MAX - (uint64_t)kWQInodeMargin) return 0;
+        if (probeInode) *probeInode = (int64_t)st.st_ino;
+        return (int64_t)st.st_ino + kWQInodeMargin;
     }
-    struct stat st = {0};
-    struct statfs sfs = {0};
-    BOOL ok = fstat(fd, &st) == 0 && fstatfs(fd, &sfs) == 0;
-    int err = errno;
-    close(fd);
-    unlink(probe.fileSystemRepresentation);
-    if (!ok) {
-        wq_log(@"inode probe: cannot inspect %@ (%@)", probe, wq_errno(err));
-        return 0;
-    }
-    if (memcmp(&sfs.f_fsid, &fsid, sizeof(fsid)) != 0) {
-        wq_log(@"inode probe: %@ is on a different volume", probe);
-        return 0;
-    }
-    if ((uint64_t)st.st_ino > (uint64_t)INT64_MAX - (uint64_t)kWQInodeMargin) return 0;
-    if (probeInode) *probeInode = (int64_t)st.st_ino;
-    return (int64_t)st.st_ino + kWQInodeMargin;
+    return 0;
 }
 
 NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancellation *cancellation,
@@ -1219,13 +1234,21 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
 {
     if (cancellation.isCancelled) return nil;
     NSString *base = wq_norm(dir);  // /private/var/... form
+    struct stat baseStat = {0};
+    int baseError = lstat(base.fileSystemRepresentation, &baseStat);
+    if (baseError == 0 && !S_ISDIR(baseStat.st_mode)) {
+        wq_log(@"enumerate %@: base is not a directory", dir);
+        return nil;
+    }
+    if (baseError != 0 && errno != EACCES && errno != EPERM) {
+        wq_log(@"enumerate %@: base is missing (%@)", dir, wq_errno(errno));
+        return nil;
+    }
     struct statfs sfs;
     if (statfs(base.fileSystemRepresentation, &sfs) != 0) {
-        struct stat baseStat;
-        if (lstat(base.fileSystemRepresentation, &baseStat) != 0 || !S_ISDIR(baseStat.st_mode)) {
-            wq_log(@"enumerate %@: base is missing or inaccessible (%@)", dir, wq_errno(errno));
-            return nil;
-        }
+        // The container parent may not even be stat-able without a token. In
+        // that case fall back to the data volume's fsid and let fsgetpath do
+        // the work; a denied parent is not the same thing as a missing parent.
         if (statfs("/private/var/mobile", &sfs) != 0) {
             wq_log(@"enumerate %@: statfs failed (%@)", dir, wq_errno(errno));
             return nil;
@@ -1282,12 +1305,12 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
     if (dynamicBound && probeInode > 0) {
         int64_t afterProbe = 0;
         if (wq_volume_max_inode(fsid, &afterProbe) <= 0 || afterProbe <= 0) {
-            wq_log(@"enumerate %@: completion probe unavailable; refusing to present a possibly partial scan", dir);
-            return nil;
-        }
-        if (afterProbe > probeInode + kWQInodeMargin) {
-            wq_log(@"enumerate %@: inode IDs advanced beyond the scanned bound; refusing to present a partial scan", dir);
-            return nil;
+            // A completion probe failure must not turn a usable partial list
+            // into "no apps at all". The initial bound still found what it
+            // scanned; callers can refresh later.
+            wq_log(@"enumerate %@: completion probe unavailable; returning the scanned subset", dir);
+        } else if (afterProbe > probeInode + kWQInodeMargin) {
+            wq_log(@"enumerate %@: inode IDs advanced beyond the scanned bound; the list may be incomplete until refreshed", dir);
         }
     }
     [found sortUsingSelector:@selector(compare:)];
