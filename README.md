@@ -61,7 +61,15 @@ without a file-by-file backup; Apps offers to back up Documents and Library
 first, while `tmp` is discarded and cannot be restored. Close the target app
 before backup, restore, or clear. The operations verify their copy/purge
 postconditions, but they are not filesystem snapshots if the target app keeps
-running. The app changes nothing on its own; every write is an action you take.
+running. Target data is changed only in response to explicit actions; interrupted
+safety transactions may be recovered on startup.
+
+File saves retain the original inode and verify descriptor identity and saved
+contents. Locks are advisory: another app that ignores them can still write
+concurrently, and in-place writes are not crash-atomic. Close the target app and
+keep the durable backups. Recovery fails closed when required safety material is
+missing. Generic overwrite/delete operations on backup-storage files are refused
+to avoid recursively backing up backups; valid backups can still be restored.
 
 Editing another app's or the system's files can break things. Keep the backups
 and only change what you understand.
@@ -83,6 +91,26 @@ entitlement (`group.cz.kolbi.wqfiles`). The technique needs an App Group, so
 re-sign with a tool that keeps one; the app uses whichever group it actually
 receives and shows it at the top of the **Log**. If it reports "No App Group",
 the signer dropped it.
+
+The deployment minimum is iOS 27.0. Builds stage and validate the archive,
+metadata, signature and App Group before replacing `WQFiles.ipa` in the project
+directory. For a separate output, set `WQFILES_FINAL_IPA` to an absolute path in
+an existing directory. The source updater validates the IPA's embedded metadata
+before atomically replacing `source.json`; its version/build arguments must
+match the artifact.
+
+## Regression tests
+
+Run `./tests/run_all_tests.sh` on macOS with Xcode and Python 3. It runs ten
+portable Foundation fixture executables, the Python release fixtures, static
+browser checks, and strict iOS arm64 compilation/linkage. Logs and generated
+files stay under `.work/tests/`; the existing IPA is not replaced. With only
+Command Line Tools installed, set `WQ_SKIP_IOS_CHECK=1` to run the host tests.
+
+These tests use disposable files and entitlement/access doubles. They do not
+issue sandbox tokens or mutate installed app containers. Real iOS signing,
+token issuance, navigation/lifecycle timing, power-loss behavior and app-side
+concurrent writes still require supported-device validation.
 
 ## Credit and license
 
