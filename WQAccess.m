@@ -1446,9 +1446,96 @@ void wq_enumerate_invalidate(void)
     }
 }
 
+
+// The container manager can list containers directly (instant, no scan). On
+// releases where it answers this app only with its own containers, the list
+// has no other apps and the fsgetpath scan is used instead. Classes are not
+// relied on: every class is asked and paths are sorted by their parent.
+static NSDictionary<NSString *, NSArray<NSString *> *> *wq_mcm_list_containers(NSArray<NSString *> *roots, NSString **summary)
+{
+    NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *found = [NSMutableDictionary new];
+    for (NSString *root in roots) found[root] = [NSMutableSet new];
+    NSMutableArray *perClass = [NSMutableArray new];
+    void *mgr = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!mgr) { *summary = @"container manager unavailable"; return nil; }
+    cq_create_fn create = (cq_create_fn)dlsym(mgr, "container_query_create");
+    cq_set_u64_fn setClass = (cq_set_u64_fn)dlsym(mgr, "container_query_set_class");
+    cq_iterate_fn iterate = (cq_iterate_fn)dlsym(mgr, "container_query_iterate_results_sync");
+    cq_free_fn freeQuery = (cq_free_fn)dlsym(mgr, "container_query_free");
+    co_get_path_fn getPath = (co_get_path_fn)dlsym(mgr, "container_object_get_path");
+    if (!create || !setClass || !iterate || !freeQuery || !getPath) {
+        dlclose(mgr);
+        *summary = @"container manager query unavailable";
+        return nil;
+    }
+    for (uint64_t cls = 1; cls <= 14; cls++) {
+        void *query = create();
+        if (!query) continue;
+        __block NSUInteger count = 0;
+        setClass(query, cls);
+        @try {
+            iterate(query, ^bool(void *object) {
+                const char *path = object ? getPath(object) : NULL;
+                if (!path || !path[0]) return true;
+                count++;
+                NSString *norm = wq_norm([NSString stringWithUTF8String:path] ?: @"");
+                NSString *parent = norm.stringByDeletingLastPathComponent;
+                [found[parent] addObject:norm];
+                return true;
+            });
+        } @catch (NSException *exception) {
+            wq_log(@"scan: container manager class %llu: %@", cls, exception.reason);
+        }
+        freeQuery(query);
+        if (count) [perClass addObject:[NSString stringWithFormat:@"%llu:%lu", cls, (unsigned long)count]];
+    }
+    dlclose(mgr);
+    NSMutableDictionary *result = [NSMutableDictionary new];
+    for (NSString *root in roots) result[root] = [found[root].allObjects sortedArrayUsingSelector:@selector(compare:)];
+    *summary = [NSString stringWithFormat:@"container manager: %lu apps, %lu extensions, %lu daemons (by class %@)",
+                (unsigned long)[result[roots[0]] count], (unsigned long)[result[roots[1]] count],
+                (unsigned long)[result[roots[2]] count], perClass.count ? [perClass componentsJoinedByString:@" "] : @"none"];
+    return result;
+}
+
+// Samples ids across the volume. On some releases fsgetpath resolves only the
+// caller's own files; then a full scan takes minutes and finds nothing.
+static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode)
+{
+    NSMutableArray<NSString *> *own = [NSMutableArray arrayWithObject:wq_norm(NSHomeDirectory())];
+    NSString *bundle = wq_norm(NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent);
+    if (bundle.length) [own addObject:bundle];
+    NSString *group = wq_app_group();
+    NSURL *groupURL = group ? [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group] : nil;
+    if (groupURL.path.length) [own addObject:wq_norm(groupURL.path)];
+    int64_t stride = MAX((int64_t)1, maxInode / 20000);
+    NSUInteger sampled = 0, resolved = 0, foreign = 0;
+    char buf[1200];
+    CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+    for (int64_t ino = 1 + (int64_t)arc4random_uniform((uint32_t)MIN(stride, (int64_t)UINT32_MAX)); ino <= maxInode; ino += stride) {
+        sampled++;
+        fsid_t id = fsid;
+        if (fsgetpath(buf, sizeof(buf), &id, (uint64_t)ino) <= 0) continue;
+        resolved++;
+        NSString *path = [NSString stringWithUTF8String:buf];
+        BOOL mine = NO;
+        for (NSString *prefix in own) if ([path hasPrefix:prefix]) { mine = YES; break; }
+        if (!mine) foreign++;
+    }
+    wq_log(@"scan: fsgetpath sample: %lu of %lu ids resolve, %lu outside WQ Files (%.1f s)",
+           (unsigned long)resolved, (unsigned long)sampled, (unsigned long)foreign, CFAbsoluteTimeGetCurrent() - started);
+    return foreign > 0;
+}
+
 static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_t fsid, qos_class_t qos)
 {
     NSArray<NSString *> *roots = wq_shared_scan_roots();
+    NSString *mcmSummary = nil;
+    NSDictionary<NSString *, NSArray<NSString *> *> *listed = wq_mcm_list_containers(roots, &mcmSummary);
+    wq_log(@"scan: %@", mcmSummary);
+    // Other apps' containers listed: no scan needed. A list with only this
+    // app's own container is not enough.
+    if ([listed[roots[0]] count] > 1) return listed;
     int64_t probeInode = 0;
     int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
     if (maxInode <= 0) {
@@ -1472,6 +1559,10 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_
     if (cache) {
         firstId = [cache[@"probe"] longLongValue] + 1;
         fullAt = [cache[@"fullAt"] doubleValue];
+    }
+    if (!cache && !wq_fsgetpath_sees_others(fsid, maxInode)) {
+        wq_log(@"scan: on this iOS version fsgetpath only resolves WQ Files' own files, so containers can't be found by scanning");
+        return nil;
     }
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     WQScanProgress report = ^(int64_t done, int64_t total, const NSUInteger *counts) {
