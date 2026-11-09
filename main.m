@@ -100,7 +100,7 @@ static UIImage *wq_round_icon(UIImage *raw)
 {
     CGFloat s = 40;
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(s, s)];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *__unused ctx) {
         [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, s, s) cornerRadius:s * 0.225] addClip];
         [raw drawInRect:CGRectMake(0, 0, s, s)];
     }];
@@ -179,7 +179,7 @@ static UIImage *wq_service_tile(NSString *bundleID)
     CGFloat s = 40;
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(s, s)];
     UIColor *fill = [color resolvedColorWithTraitCollection:[UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleLight]];
-    tile = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+    tile = [r imageWithActions:^(UIGraphicsImageRendererContext *__unused ctx) {
         [fill setFill];
         [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, s, s) cornerRadius:s * 0.225] fill];
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightSemibold];
@@ -253,8 +253,8 @@ static void wq_present_share(UIViewController *host, NSString *file, NSString *e
         initWithActivityItems:@[[NSURL fileURLWithPath:file]] applicationActivities:nil];
     share.popoverPresentationController.sourceView = source ?: host.view;
     share.popoverPresentationController.sourceRect = (source ?: host.view).bounds;
-    share.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed,
-                                         NSArray *returnedItems, NSError *activityError) {
+    share.completionWithItemsHandler = ^(UIActivityType __unused activityType, BOOL __unused completed,
+                                         NSArray *__unused returnedItems, NSError *__unused activityError) {
         [NSFileManager.defaultManager removeItemAtPath:exportDir error:nil];
     };
     [host presentViewController:share animated:YES completion:nil];
@@ -413,7 +413,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
     _textView.delegate = self;
     [self.view addSubview:_textView];
     __weak typeof(self) weakSelf = self;
-    self.navigationItem.backAction = [UIAction actionWithHandler:^(UIAction *a) { [weakSelf leave]; }];
+    self.navigationItem.backAction = [UIAction actionWithHandler:^(UIAction *__unused a) { [weakSelf leave]; }];
     _imageView = [UIImageView new];
     _imageView.translatesAutoresizingMaskIntoConstraints = NO;
     _imageView.contentMode = UIViewContentModeScaleAspectFit;
@@ -432,9 +432,9 @@ static const NSUInteger kHexLimit = 64 * 1024;
                                                                            target:self action:@selector(share:)];
     UIMenu *openAs = [UIMenu menuWithTitle:@"Open As" children:@[
         [UIAction actionWithTitle:@"Plist Editor" image:[UIImage systemImageNamed:@"list.bullet.indent"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf reopenAs:WQOpenPlist]; }],
+                          handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenPlist]; }],
         [UIAction actionWithTitle:@"Hex Viewer" image:[UIImage systemImageNamed:@"number"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf reopenAs:WQOpenHex]; }],
+                          handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenHex]; }],
     ]];
     UIBarButtonItem *more = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:openAs];
     self.navigationItem.rightBarButtonItems = @[share, more];
@@ -449,7 +449,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
         NSString *error = nil;
         struct stat st;
         BOOL exists = wq_stat(path, &st);
-        NSDictionary *before = wq_file_version(path);
+        NSDictionary *__unused before = wq_file_version(path);
         NSData *data = wq_read(path, kViewLimit + 1, &error);
         NSDictionary *version = wq_file_version(path);
         if (data && (!before || ![before isEqualToDictionary:version])) {
@@ -579,7 +579,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your text changes have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         self->_dirty = NO;
         self->_revision++;
         self->_textView.editable = NO;
@@ -635,7 +635,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Save changes?" message:message
                                                               preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         NSUInteger savedRevision = self->_revision;
         self->_saving = YES;
         self->_textView.editable = NO;
@@ -777,12 +777,12 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     NSMutableArray<UIMenuElement *> *menuItems = [NSMutableArray new];
     if (!self.readOnly) {
         [menuItems addObject:[UIAction actionWithTitle:@"New Folder" image:[UIImage systemImageNamed:@"folder.badge.plus"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf promptNewFolder]; }]];
+                          handler:^(UIAction *__unused a) { [weakSelf promptNewFolder]; }]];
         [menuItems addObject:[UIAction actionWithTitle:@"Import File" image:[UIImage systemImageNamed:@"square.and.arrow.down"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf importFile]; }]];
+                          handler:^(UIAction *__unused a) { [weakSelf importFile]; }]];
     }
     [menuItems addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil
-                          handler:^(UIAction *a) { UIPasteboard.generalPasteboard.string = path; }]];
+                          handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = path; }]];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
                                                                                menu:[UIMenu menuWithChildren:menuItems]];
     [self updateHeader];
@@ -866,7 +866,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     if (!_query) { _items = _all; return; }
     NSStringCompareOptions opts = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
     NSString *q = _query;
-    _items = [_all filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQItem *item, NSDictionary *b) {
+    _items = [_all filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQItem *item, NSDictionary *__unused b) {
         for (NSString *field in @[item.label ?: @"", item.name ?: @"", item.bundleID ?: @""])
             if ([field rangeOfString:q options:opts].location != NSNotFound) return YES;
         return NO;
@@ -898,7 +898,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                 self->_scanStatus = @"Scanning inodes…";
                 [self updateHeader];
             });
-            childPaths = wq_enumerate(path, 0, cancellation, ^(int64_t done, int64_t total, NSUInteger f) {
+            childPaths = wq_enumerate(path, 0, cancellation, ^(int64_t done, int64_t total, NSUInteger __unused f) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                     self->_scanStatus = [NSString stringWithFormat:@"Scanning inodes… %lld%% · %lu found",
@@ -1048,18 +1048,18 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     WQItem *item = _items[(NSUInteger)indexPath.row];
     __weak typeof(self) weakSelf = self;
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
-        actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) {
+        actionProvider:^UIMenu *(NSArray<UIMenuElement *> *__unused suggested) {
         NSMutableArray *actions = [NSMutableArray new];
         if (item.isDir) {
             [actions addObject:[UIAction actionWithTitle:@"Share as ZIP (AirDrop…)" image:[UIImage systemImageNamed:@"square.and.arrow.up"]
-                                              identifier:nil handler:^(UIAction *a) {
+                                              identifier:nil handler:^(UIAction *__unused a) {
                 UITableViewCell *cell = [weakSelf.tableView cellForRowAtIndexPath:indexPath];
                 if (weakSelf) wq_share_folder(weakSelf, item.path, nil, cell);
             }]];
         }
         if (!item.isDir) {
             [actions addObject:[UIAction actionWithTitle:@"Share" image:[UIImage systemImageNamed:@"square.and.arrow.up"]
-                                              identifier:nil handler:^(UIAction *a) {
+                                              identifier:nil handler:^(UIAction *__unused a) {
                 UITableViewCell *cell = [weakSelf.tableView cellForRowAtIndexPath:indexPath];
                 if (weakSelf) wq_share(weakSelf, item.path, cell);
             }]];
@@ -1067,7 +1067,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             if (original) {
                 [actions addObject:[UIAction actionWithTitle:@"Restore to Original Location"
                                                        image:[UIImage systemImageNamed:@"arrow.uturn.backward"]
-                                                  identifier:nil handler:^(UIAction *a) {
+                                                  identifier:nil handler:^(UIAction *__unused a) {
                     [weakSelf restoreBackup:item.path to:original];
                 }]];
             }
@@ -1078,28 +1078,28 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             [actions addObject:[UIMenu menuWithTitle:@"Open As" image:[UIImage systemImageNamed:@"arrow.up.forward.app"] identifier:nil
                                              options:0 children:@[
                 [UIAction actionWithTitle:@"Plist Editor" image:[UIImage systemImageNamed:@"list.bullet.indent"] identifier:nil
-                                  handler:^(UIAction *a) { wq_open_file(nav, item.path, ro, WQOpenPlist); }],
+                                  handler:^(UIAction *__unused a) { wq_open_file(nav, item.path, ro, WQOpenPlist); }],
                 [UIAction actionWithTitle:@"Text / Image" image:[UIImage systemImageNamed:@"doc.plaintext"] identifier:nil
-                                  handler:^(UIAction *a) { wq_open_file(nav, item.path, ro, WQOpenText); }],
+                                  handler:^(UIAction *__unused a) { wq_open_file(nav, item.path, ro, WQOpenText); }],
                 [UIAction actionWithTitle:@"Hex Viewer" image:[UIImage systemImageNamed:@"number"] identifier:nil
-                                  handler:^(UIAction *a) { wq_open_file(nav, item.path, ro, WQOpenHex); }],
+                                  handler:^(UIAction *__unused a) { wq_open_file(nav, item.path, ro, WQOpenHex); }],
             ]]];
         }
         [actions addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"]
-                                          identifier:nil handler:^(UIAction *a) {
+                                          identifier:nil handler:^(UIAction *__unused a) {
             UIPasteboard.generalPasteboard.string = item.path;
         }]];
         if (item.label) {
             [actions addObject:[UIAction actionWithTitle:@"Copy Identifier" image:[UIImage systemImageNamed:@"tag"]
-                                              identifier:nil handler:^(UIAction *a) {
+                                              identifier:nil handler:^(UIAction *__unused a) {
                 UIPasteboard.generalPasteboard.string = item.label;
             }]];
         }
         if (!weakSelf.readOnly) {
             [actions addObject:[UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"]
-                                              identifier:nil handler:^(UIAction *a) { [weakSelf promptRename:item]; }]];
+                                              identifier:nil handler:^(UIAction *__unused a) { [weakSelf promptRename:item]; }]];
             UIAction *del = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"]
-                                           identifier:nil handler:^(UIAction *a) { [weakSelf confirmDelete:item]; }];
+                                           identifier:nil handler:^(UIAction *__unused a) { [weakSelf confirmDelete:item]; }];
             del.attributes = UIMenuElementAttributesDestructive;
             [actions addObject:del];
         }
@@ -1127,7 +1127,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *f) { f.placeholder = @"Name"; }];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         NSString *name = alert.textFields.firstObject.text;
         if (name.length == 0 || [name containsString:@"/"]) return;
         NSString *path = [self->_path stringByAppendingPathComponent:name];
@@ -1142,7 +1142,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *f) { f.text = item.name; }];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Rename" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Rename" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         NSString *name = alert.textFields.firstObject.text;
         [self runIO:^BOOL(NSString **error) { return wq_rename(item.path, name, error); } failure:@"Cannot rename"];
     }]];
@@ -1158,7 +1158,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                                                                    message:message
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         [self runIO:^BOOL(NSString **error) { return wq_delete(item.path, error); } failure:@"Cannot delete"];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
@@ -1170,7 +1170,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restore" message:message
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Restore" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Restore" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         [self runIO:^BOOL(NSString **error) {
             struct stat st;
             return wq_stat(original, &st) ? wq_write_from_file(original, backup, error)
@@ -1212,8 +1212,8 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                 message:[NSString stringWithFormat:@"%@ already exists. It is backed up before being replaced.", dest]
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
-                                                    handler:^(UIAlertAction *a) { cleanup(); }]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"Replace" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+                                                    handler:^(UIAlertAction *__unused a) { cleanup(); }]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Replace" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
                 [self runIO:^BOOL(NSString **error) {
                     BOOL ok = wq_write_from_file(dest, source, error);
                     cleanup();
@@ -1318,7 +1318,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
         f.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Open" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Open" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         NSString *name = alert.textFields.firstObject.text;
         if (name.length == 0 || [name containsString:@"/"]) return;
         NSString *path = [kSystemGroupRoot stringByAppendingPathComponent:name];
@@ -1548,7 +1548,7 @@ static NSString *const kCrashLogsPath =
 - (NSArray<WQCacheItem *> *)visibleItems
 {
     if (!_query.length) return _items;
-    return [_items filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQCacheItem *it, NSDictionary *b) {
+    return [_items filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQCacheItem *it, NSDictionary *__unused b) {
         return [it.name localizedCaseInsensitiveContainsString:self->_query] ||
                (it.bundleID && [it.bundleID localizedCaseInsensitiveContainsString:self->_query]);
     }]];
@@ -1582,13 +1582,13 @@ static NSString *const kCrashLogsPath =
     BOOL allVisible = visible.count > 0;
     for (WQCacheItem *it in visible) if (!it.selected) { allVisible = NO; break; }
     __weak typeof(self) weakSelf = self;
-    UIAction *all = [UIAction actionWithTitle:@"Select All" image:[UIImage systemImageNamed:@"checkmark.circle"]
-                                   identifier:nil handler:^(UIAction *a) { [weakSelf selectWhere:^BOOL(WQCacheItem *it) { return YES; }]; }];
+    UIAction *__unused all = [UIAction actionWithTitle:@"Select All" image:[UIImage systemImageNamed:@"checkmark.circle"]
+                                   identifier:nil handler:^(UIAction *__unused a) { [weakSelf selectWhere:^BOOL(WQCacheItem *__unused it) { return YES; }]; }];
     UIAction *none = [UIAction actionWithTitle:@"Select None" image:[UIImage systemImageNamed:@"circle"]
-                                    identifier:nil handler:^(UIAction *a) { [weakSelf selectWhere:^BOOL(WQCacheItem *it) { return NO; }]; }];
+                                    identifier:nil handler:^(UIAction *__unused a) { [weakSelf selectWhere:^BOOL(WQCacheItem *__unused it) { return NO; }]; }];
     UIAction *large = [UIAction actionWithTitle:@"Select Large Caches (50 MB+)" image:[UIImage systemImageNamed:@"arrow.up.circle"]
-                                     identifier:nil handler:^(UIAction *a) {
-        [weakSelf selectWhere:^BOOL(WQCacheItem *it) { return it.bytes >= 50ull * 1000 * 1000; }];
+                                     identifier:nil handler:^(UIAction *__unused a) {
+        [weakSelf selectWhere:^BOOL(WQCacheItem *__unused it) { return it.bytes >= 50ull * 1000 * 1000; }];
     }];
     all.state = allVisible ? UIMenuElementStateOn : UIMenuElementStateOff;
     UIBarButtonItem *select = [[UIBarButtonItem alloc] initWithTitle:@"Select"
@@ -1614,7 +1614,7 @@ static NSString *const kCrashLogsPath =
         for (NSString *root in roots) {
             if (cancellation.isCancelled) return;
             NSString *kind = [root.lastPathComponent isEqualToString:@"Application"] ? @"apps" : @"extensions";
-            NSArray *containers = wq_enumerate(root, 0, cancellation, ^(int64_t done, int64_t total, NSUInteger f) {
+            NSArray *containers = wq_enumerate(root, 0, cancellation, ^(int64_t done, int64_t total, NSUInteger __unused f) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                     [self setStatus:[NSString stringWithFormat:@"Finding %@… %lld%%", kind, (long long)(done * 100 / total)]];
@@ -1753,25 +1753,25 @@ static NSString *const kCrashLogsPath =
     WQCacheItem *item = self.visibleItems[(NSUInteger)indexPath.row];
     __weak typeof(self) weakSelf = self;
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
-                                                    actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) {
+                                                    actionProvider:^UIMenu *(NSArray<UIMenuElement *> *__unused suggested) {
         NSMutableArray *actions = [NSMutableArray new];
         if (!item.bundleID) {
             NSString *root = item.targets.firstObject;
             [actions addObject:[UIAction actionWithTitle:@"Show Crash Logs in File Browser" image:[UIImage systemImageNamed:@"folder"]
-                                              identifier:nil handler:^(UIAction *a) { [weakSelf openFolder:root title:@"Crash Logs"]; }]];
+                                              identifier:nil handler:^(UIAction *__unused a) { [weakSelf openFolder:root title:@"Crash Logs"]; }]];
         } else {
             NSString *caches = item.targets[0], *tmp = item.targets[1];
             [actions addObject:[UIAction actionWithTitle:@"Show Caches in File Browser" image:[UIImage systemImageNamed:@"folder"]
-                                              identifier:nil handler:^(UIAction *a) {
+                                              identifier:nil handler:^(UIAction *__unused a) {
                 [weakSelf openFolder:caches title:[item.name stringByAppendingString:@" · Caches"]];
             }]];
             if (item.tempBytes > 0)
                 [actions addObject:[UIAction actionWithTitle:@"Show tmp in File Browser" image:[UIImage systemImageNamed:@"folder"]
-                                                  identifier:nil handler:^(UIAction *a) {
+                                                  identifier:nil handler:^(UIAction *__unused a) {
                     [weakSelf openFolder:tmp title:[item.name stringByAppendingString:@" · tmp"]];
                 }]];
             [actions addObject:[UIAction actionWithTitle:@"Show App Data in File Browser" image:[UIImage systemImageNamed:@"folder.badge.gearshape"]
-                                              identifier:nil handler:^(UIAction *a) {
+                                              identifier:nil handler:^(UIAction *__unused a) {
                 [weakSelf openFolder:caches.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent title:item.name];
             }]];
         }
@@ -1799,7 +1799,7 @@ static NSString *const kCrashLogsPath =
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clean caches?" message:msg
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Clean" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Clean" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         [self clean];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
@@ -1863,7 +1863,7 @@ static NSString *const kCrashLogsPath =
     BOOL _scanning;
 }
 
-static NSArray<NSString *> *const kAppDataParts(void) { return @[@"Documents", @"Library", @"tmp"]; }
+static NSArray<NSString *> *kAppDataParts(void) { return @[@"Documents", @"Library", @"tmp"]; }
 
 static NSString *wq_app_backup_root(NSString *bundleID)
 {
@@ -1907,7 +1907,7 @@ static NSArray<NSDictionary *> *wq_app_backups(NSString *bundleID)
     return out;
 }
 
-static NSString *wq_backup_label(NSDictionary *backup)
+static NSString *wq_backup_label(NSDictionary *__unused backup)
 {
     NSString *label = backup[@"name"];
     if ([backup[@"reason"] length]) label = [label stringByAppendingFormat:@" (%@)", [backup[@"reason"] lowercaseString]];
@@ -2017,7 +2017,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     NSString *home = [NSHomeDirectory() stringByResolvingSymlinksInPath];
     dispatch_async(wq_io(), ^{
         NSArray *containers = wq_enumerate(@"/private/var/mobile/Containers/Data/Application", 0, cancellation,
-            ^(int64_t done, int64_t total, NSUInteger f) {
+            ^(int64_t done, int64_t total, NSUInteger __unused f) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (generation != self->_scanGeneration || cancellation.isCancelled) return;
                     self->_status = [NSString stringWithFormat:@"Finding apps… %lld%%", (long long)(done * 100 / total)];
@@ -2081,7 +2081,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
 - (NSArray<WQAppItem *> *)visibleApps
 {
     if (!_query.length) return _apps;
-    return [_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *b) {
+    return [_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
         return [a.name localizedCaseInsensitiveContainsString:self->_query] ||
                [a.bundleID localizedCaseInsensitiveContainsString:self->_query];
     }]];
@@ -2156,11 +2156,11 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
             message:[NSString stringWithFormat:@"%@\n\n%@", app.container, why]
             preferredStyle:UIAlertControllerStyleActionSheet];
         if (app.hasAccess) {
-            [sheet addAction:[UIAlertAction actionWithTitle:@"Open Data Folder" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"Open Data Folder" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
                 [self.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name] animated:YES];
             }]];
         }
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Copy Container Path" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Copy Container Path" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
             UIPasteboard.generalPasteboard.string = app.container;
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
@@ -2173,7 +2173,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:app.name
         message:[NSString stringWithFormat:@"%@\n%@ of data", app.bundleID, wq_size_text(app.bytes)]
         preferredStyle:UIAlertControllerStyleActionSheet];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Back Up Data" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Back Up Data" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         [self backUp:app then:nil];
     }]];
     NSArray *backups = app.backups;
@@ -2181,19 +2181,19 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     if (latest) {
         NSString *title = backups.count == 1 ? [NSString stringWithFormat:@"Restore Backup (%@)", wq_backup_label(backups.firstObject)]
                                              : [NSString stringWithFormat:@"Restore a Backup… (%lu)", (unsigned long)backups.count];
-        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
             [self pickBackupToRestore:app from:[tableView cellForRowAtIndexPath:indexPath]];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:@"Share Latest Backup (AirDrop…)"
-                                                  style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                                                  style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
             UITableViewCell *c = [tableView cellForRowAtIndexPath:indexPath];
             wq_share_folder(self, latest, [NSString stringWithFormat:@"%@ %@", app.name, latest.lastPathComponent], c);
         }]];
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Clear Data…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Clear Data…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         [self confirmClear:app];
     }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Open Data Folder" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Open Data Folder" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         [self.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name] animated:YES];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
@@ -2248,13 +2248,13 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
         message:@"Deletes everything in the app's Documents, Library and tmp, like a fresh install. "
                 "Logins, settings and offline content are lost. Close the app first."
         preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Back Up, Then Clear" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Back Up, Then Clear" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         [self backUp:app then:^(BOOL ok) {
             if (ok) [self clear:app];
             else [self finish:@"Not cleared" message:@"The backup did not complete, so nothing was deleted."];
         }];
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Clear Without Backup" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Clear Without Backup" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         [self clear:app];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
@@ -2267,9 +2267,9 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     if (backups.count == 1) { [self confirmRestore:app from:backups.firstObject]; return; }
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Restore which backup?" message:app.name
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSDictionary *b in backups) {
+    for (NSDictionary *__unused b in backups) {
         [sheet addAction:[UIAlertAction actionWithTitle:wq_backup_label(b) style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) { [self confirmRestore:app from:b]; }]];
+                                                handler:^(UIAlertAction *__unused a) { [self confirmRestore:app from:b]; }]];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = source ?: self.view;
@@ -2288,7 +2288,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
                  wq_backup_label(backup), warning]
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Restore" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Restore" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
         [self setBusy:YES status:[NSString stringWithFormat:@"Restoring %@…", app.name]];
         dispatch_async(wq_io(), ^{
             NSString *title = nil, *message = nil;
@@ -2610,7 +2610,7 @@ static NSString *wq_recover_interrupted_restore(void)
         cfg.imagePadding = 6;
         cfg.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
         cfg.buttonSize = UIButtonConfigurationSizeSmall;
-        return [UIButton buttonWithConfiguration:cfg primaryAction:[UIAction actionWithHandler:^(UIAction *a) {
+        return [UIButton buttonWithConfiguration:cfg primaryAction:[UIAction actionWithHandler:^(UIAction *__unused a) {
             [UIApplication.sharedApplication openURL:[NSURL URLWithString:url] options:@{} completionHandler:nil];
         }]];
     };
@@ -2624,7 +2624,7 @@ static NSString *wq_recover_interrupted_restore(void)
     creditCfg.attributedTitle = [[NSAttributedString alloc] initWithString:@"Sandbox escape: worse_query by @forcequitOS"
         attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote]}];
     creditCfg.buttonSize = UIButtonConfigurationSizeSmall;
-    UIButton *credit = [UIButton buttonWithConfiguration:creditCfg primaryAction:[UIAction actionWithHandler:^(UIAction *a) {
+    UIButton *credit = [UIButton buttonWithConfiguration:creditCfg primaryAction:[UIAction actionWithHandler:^(UIAction *__unused a) {
         [UIApplication.sharedApplication openURL:[NSURL URLWithString:@"https://x.com/forcequitOS"] options:@{} completionHandler:nil];
     }]];
 
@@ -2723,7 +2723,7 @@ static NSString *wq_recover_interrupted_restore(void)
         f.clearButtonMode = UITextFieldViewModeAlways;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Open" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Open" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         NSString *path = alert.textFields.firstObject.text.stringByStandardizingPath;
         if (![path hasPrefix:@"/"]) return;
         dispatch_async(wq_io(), ^{

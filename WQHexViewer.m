@@ -77,7 +77,7 @@ static NSData *wqh_parse_hex(NSString *text)
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.tableView.rowHeight = 20;
     __weak typeof(self) weakSelf = self;
-    self.navigationItem.backAction = [UIAction actionWithHandler:^(UIAction *a) { [weakSelf leave]; }];
+    self.navigationItem.backAction = [UIAction actionWithHandler:^(UIAction *__unused a) { [weakSelf leave]; }];
     NSString *path = _path;
     dispatch_async(_queue, ^{
         struct stat st;
@@ -143,15 +143,15 @@ static NSData *wqh_parse_hex(NSString *text)
     }
     __weak typeof(self) weakSelf = self;
     UIAction *discard = [UIAction actionWithTitle:@"Discard Changes" image:[UIImage systemImageNamed:@"arrow.uturn.backward"] identifier:nil
-                                      handler:^(UIAction *a) { [weakSelf discard]; }];
+                                      handler:^(UIAction *__unused a) { [weakSelf discard]; }];
     if (_saving) discard.attributes = UIMenuElementAttributesDisabled;
     UIMenu *menu = [UIMenu menuWithChildren:@[
         [UIAction actionWithTitle:@"Go to Offset…" image:[UIImage systemImageNamed:@"arrow.right.to.line"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf goToOffset]; }],
+                          handler:^(UIAction *__unused a) { [weakSelf goToOffset]; }],
         [UIAction actionWithTitle:@"Find Hex Bytes…" image:[UIImage systemImageNamed:@"magnifyingglass"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf promptFindHex:YES]; }],
+                          handler:^(UIAction *__unused a) { [weakSelf promptFindHex:YES]; }],
         [UIAction actionWithTitle:@"Find Text…" image:[UIImage systemImageNamed:@"text.magnifyingglass"] identifier:nil
-                          handler:^(UIAction *a) { [weakSelf promptFindHex:NO]; }],
+                          handler:^(UIAction *__unused a) { [weakSelf promptFindHex:NO]; }],
         discard,
     ]];
     [items addObject:[[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:menu]];
@@ -271,7 +271,7 @@ static NSData *wqh_parse_hex(NSString *text)
         f.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Set" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Set" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSData *bytes = wqh_parse_hex(a.textFields.firstObject.text ?: @"");
         if (bytes.length != count) {
             wqh_alert(self, @"Not changed", [NSString stringWithFormat:@"Enter exactly %lu bytes in hex.", (unsigned long)count]);
@@ -331,7 +331,7 @@ static NSData *wqh_parse_hex(NSString *text)
                  (unsigned long)_edits.count, _path]
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
         NSUInteger savedRevision = self->_revision;
         self->_saving = YES;
         [self updateBar];
@@ -375,7 +375,7 @@ static NSData *wqh_parse_hex(NSString *text)
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your byte changes have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
         [self->_edits removeAllObjects];
         self->_revision++;
         proceed();
@@ -411,7 +411,7 @@ static NSData *wqh_parse_hex(NSString *text)
         f.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Go" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Go" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSString *t = [a.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
         BOOL hex = [t.lowercaseString hasPrefix:@"0x"];
         unsigned long long off = strtoull((hex ? [t substringFromIndex:2] : t).UTF8String, NULL, hex ? 16 : 10);
@@ -430,7 +430,7 @@ static NSData *wqh_parse_hex(NSString *text)
         f.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Find" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Find" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSString *t = a.textFields.firstObject.text ?: @"";
         NSData *needle = hex ? wqh_parse_hex(t) : [t dataUsingEncoding:NSUTF8StringEncoding];
         if (needle.length == 0) { wqh_alert(self, @"Nothing to find", hex ? @"Enter hex bytes, e.g. de ad be ef." : @"Enter some text."); return; }

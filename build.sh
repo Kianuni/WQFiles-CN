@@ -8,7 +8,7 @@ APP=$OUT/Payload/WQFiles.app
 rm -rf "$OUT"; mkdir -p "$APP"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 xcrun --sdk iphoneos clang -fobjc-arc -fmodules -arch arm64 -miphoneos-version-min=17.0 \
-    -isysroot "$SDK" -Wall -Werror -O2 \
+    -isysroot "$SDK" -Wall -Wextra -Werror -O2 \
     -framework UIKit -framework Foundation -framework Security -framework UniformTypeIdentifiers \
     WQAccess.m WQPlistEditor.m WQHexViewer.m main.m -o "$APP/WQFiles"
 cp Info.plist "$APP/Info.plist"

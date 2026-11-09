@@ -175,7 +175,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     if (self.isRoot) {
         __weak typeof(self) weakSelf = self;
-        self.navigationItem.backAction = [UIAction actionWithHandler:^(UIAction *a) { [weakSelf leave]; }];
+        self.navigationItem.backAction = [UIAction actionWithHandler:^(UIAction *__unused a) { [weakSelf leave]; }];
         [self load];
     }
     [self updateBar];
@@ -192,7 +192,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     NSString *path = self.doc.path;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
-        NSDictionary *before = wq_file_version(path);
+        NSDictionary *__unused before = wq_file_version(path);
         NSData *data = wq_read(path, 64 * 1024 * 1024, &error);
         NSDictionary *version = wq_file_version(path);
         if (data && (!before || ![before isEqualToDictionary:version])) {
@@ -260,15 +260,15 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     if (self.isArray && !self.doc.readOnly && !self.doc.saving && self.container) {
         [menu addObject:[UIAction actionWithTitle:self.tableView.editing ? @"Done Reordering" : @"Reorder Items"
                                             image:[UIImage systemImageNamed:@"arrow.up.arrow.down"] identifier:nil
-                                          handler:^(UIAction *a) {
+                                          handler:^(UIAction *__unused a) {
             [weakSelf.tableView setEditing:!weakSelf.tableView.editing animated:YES];
             [weakSelf updateBar];
         }]];
     }
     if (self.openAsText) [menu addObject:[UIAction actionWithTitle:@"Open as XML Text" image:[UIImage systemImageNamed:@"doc.plaintext"]
-                                                         identifier:nil handler:^(UIAction *a) { [weakSelf leaveThen:weakSelf.openAsText]; }]];
+                                                         identifier:nil handler:^(UIAction *__unused a) { [weakSelf leaveThen:weakSelf.openAsText]; }]];
     if (self.openAsHex) [menu addObject:[UIAction actionWithTitle:@"Open in Hex Viewer" image:[UIImage systemImageNamed:@"number"]
-                                                        identifier:nil handler:^(UIAction *a) { [weakSelf leaveThen:weakSelf.openAsHex]; }]];
+                                                        identifier:nil handler:^(UIAction *__unused a) { [weakSelf leaveThen:weakSelf.openAsHex]; }]];
     if (menu.count)
         [items addObject:[[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
                                                            menu:[UIMenu menuWithChildren:menu]]];
@@ -299,7 +299,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 {
     if ([self blockWhileSaving]) return;
     UINavigationController *nav = self.navigationController;
-    NSUInteger rootIndex = [nav.viewControllers indexOfObjectPassingTest:^BOOL(UIViewController *vc, NSUInteger i, BOOL *stop) {
+    NSUInteger rootIndex = [nav.viewControllers indexOfObjectPassingTest:^BOOL(UIViewController *vc, NSUInteger __unused i, BOOL *__unused stop) {
         return [vc isKindOfClass:WQPlistEditorViewController.class] && ((WQPlistEditorViewController *)vc).isRoot &&
                ((WQPlistEditorViewController *)vc).doc == self.doc;
     }];
@@ -312,7 +312,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your edits to this property list have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
         self.doc.dirty = NO;
         go();
     }]];
@@ -327,7 +327,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Discard changes?"
         message:@"Your edits to this property list have not been saved." preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
         self.doc.dirty = NO;
         proceed();
     }]];
@@ -351,7 +351,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
                  doc.path, fmt]
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused x) {
         NSUInteger savedRevision = doc.revision;
         doc.saving = YES;
         [self refresh];
@@ -490,7 +490,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
         if (t == WQPTypeReal) f.keyboardType = UIKeyboardTypeDecimalPad;
     }];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Set" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"Set" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSString *text = a.textFields.firstObject.text ?: @"";
         id value = nil;
         switch (t) {
@@ -525,7 +525,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add" message:@"Type of the new value"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     for (WQPType t = WQPTypeString; t <= WQPTypeArray; t++) {
-        [sheet addAction:[UIAlertAction actionWithTitle:wqp_type_name(t) style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+        [sheet addAction:[UIAlertAction actionWithTitle:wqp_type_name(t) style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
             [self addValueOfType:t];
         }]];
     }
@@ -561,7 +561,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
         f.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused x) {
         NSString *key = a.textFields.firstObject.text ?: @"";
         if (key.length == 0) return;
         if (![key isEqualToString:current] && self.container[key]) {
@@ -579,7 +579,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     if (self.doc.readOnly || self.doc.saving) return nil;
     NSInteger row = indexPath.row;
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:@"Delete"
-        handler:^(UIContextualAction *action, UIView *view, void (^completion)(BOOL)) {
+        handler:^(UIContextualAction *__unused action, UIView *__unused view, void (^completion)(BOOL)) {
         if (self.isArray) [self.container removeObjectAtIndex:(NSUInteger)row];
         else [self.container removeObjectForKey:self.keys[(NSUInteger)row]];
         [self changed];
@@ -587,7 +587,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     }];
     if (self.isArray) return [UISwipeActionsConfiguration configurationWithActions:@[del]];
     UIContextualAction *rename = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal title:@"Rename"
-        handler:^(UIContextualAction *action, UIView *view, void (^completion)(BOOL)) {
+        handler:^(UIContextualAction *__unused action, UIView *__unused view, void (^completion)(BOOL)) {
         NSString *old = self.keys[(NSUInteger)row];
         [self askKey:old title:@"Rename Key" done:^(NSString *key) {
             if ([key isEqualToString:old]) return;
