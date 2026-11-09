@@ -803,7 +803,10 @@ static NSString *wq_folder_date_text(NSDate *date)
                          @"/private/var/mobile/Containers/Data/PluginKitPlugin",
                          @"/var/mobile/Containers/Data/PluginKitPlugin",
                          @"/private/var/mobile/Containers/Data/InternalDaemon",
-                         @"/var/mobile/Containers/Data/InternalDaemon"] containsObject:path];
+                         @"/var/mobile/Containers/Data/InternalDaemon",
+                         // Listable on iOS 27; on iOS 26 only by scanning.
+                         @"/private/var/mobile/Containers/Shared/AppGroup",
+                         @"/var/mobile/Containers/Shared/AppGroup"] containsObject:path];
     dispatch_async(wq_io(), ^{
         NSString *error = nil;
         NSArray *names = wq_list(path, &error);
@@ -1502,8 +1505,9 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
             @[@"App Groups", @"/private/var/mobile/Containers/Shared/AppGroup", @"square.stack.3d.up"],
             @[@"Extension Data", @"/private/var/mobile/Containers/Data/PluginKitPlugin", @"puzzlepiece.extension"],
             @[@"Internal Daemons", @"/private/var/mobile/Containers/Data/InternalDaemon", @"gearshape.2"],
-            @[@"System Data", @"/private/var/containers/Data/System", @"cpu"],
         ];
+        if (wq_system_areas_reachable())
+            _locations = [_locations arrayByAddingObject:@[@"System Data", @"/private/var/containers/Data/System", @"cpu"]];
     }
     return self;
 }
@@ -1581,7 +1585,8 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
-    return section == 0 ? (NSInteger)_locations.count + 1 : 6;
+    // System Groups is the extra last row, on iOS 27 only.
+    return section == 0 ? (NSInteger)_locations.count + (wq_system_areas_reachable() ? 1 : 0) : 6;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section
@@ -1591,6 +1596,8 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
 {
+    if (section == 0 && !wq_system_areas_reachable())
+        return @"On iOS 26, System Data and System Groups can't be reached; worse_query covers them on iOS 27 only.";
     return section == 1
         ? @"Overwritten and deleted files are copied to Backups first (also visible in the Files app). Long-press a backup to restore it."
         : nil;

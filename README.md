@@ -1,9 +1,16 @@
 # Worse Query Files
 
-**WQ Files** is a file browser, app data manager and cache cleaner for iOS 27.
-"WQ" stands for worse_query, the sandbox technique it is built on. It reaches
-other apps' and system containers with no jailbreak and no kernel exploit.
-Built and tested on iOS 27.0.1.
+**WQ Files** is a file browser, app data manager and cache cleaner for iOS 26
+and 27. "WQ" stands for worse_query, the sandbox technique it is built on. It
+reaches other apps' and system containers with no jailbreak and no kernel
+exploit. Built and tested on iOS 27.0.1.
+
+**iOS 26 (26.0 to 26.7.2):** worse_query reaches the app, extension, daemon
+and app group containers, but not System Data or the system groups. On iOS 26
+WQ Files therefore hides System Data and System Groups, the Cache Cleaner has
+no crash-log section, and App Groups are found by scanning. Apps, backups,
+restores, clearing app data, the Cache Cleaner and the file browser work as on
+iOS 27.
 
 ## What it opens
 
@@ -142,7 +149,7 @@ re-sign with a tool that keeps one; the app uses whichever group it actually
 receives and shows it at the top of the **Log**. If it reports "No App Group",
 the signer dropped it.
 
-The deployment minimum is iOS 27.0. Builds first run the host regression suite,
+The deployment minimum is iOS 26.0. Builds first run the host regression suite,
 then stage and validate the archive, metadata, signature and App Group before
 replacing `WQFiles.ipa` in the project directory. Set `WQ_SKIP_PREFLIGHT=1` for
 fixture builds that do not have a test tree. For a separate output, set

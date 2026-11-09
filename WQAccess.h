@@ -113,6 +113,9 @@ BOOL wq_stat(NSString *path, struct stat *st);
 // Forget the shared container scan (App Data, Extensions, Internal Daemons),
 // so the next wq_enumerate of those scans again. Call on a user's refresh.
 void wq_enumerate_invalidate(void);
+// NO on iOS 26: there worse_query can't reach System Data, the system groups
+// or the App Groups parent folder (only the individual containers).
+BOOL wq_system_areas_reachable(void);
 NSArray<NSString *> *_Nullable wq_enumerate(NSString *dir, int64_t maxInode,
                                             WQScanCancellation *_Nullable cancellation,
                                             void (^_Nullable progress)(int64_t done, int64_t total, NSUInteger found));

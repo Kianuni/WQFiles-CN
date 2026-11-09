@@ -24,7 +24,7 @@ SOURCE = os.path.join(ROOT, "source.json")
 EXPECTED_APP_PATH = "Payload/WQFiles.app"
 EXPECTED_INFO_PATH = f"{EXPECTED_APP_PATH}/Info.plist"
 EXPECTED_EXECUTABLE_PATH = f"{EXPECTED_APP_PATH}/WQFiles"
-MINIMUM_IOS_VERSION = "27.0"
+MINIMUM_IOS_VERSION = "26.0"
 
 
 def _version_tuple(value: str) -> Tuple[int, ...]:

@@ -167,6 +167,14 @@ static int64_t wq_query_token(NSString *group, BOOL altFlags)
     }
 }
 
+BOOL wq_system_areas_reachable(void)
+{
+    // worse_query reaches System Data, the system groups and the App Groups
+    // parent only on iOS 27; on iOS 26 it reaches the individual app,
+    // extension, daemon and app group containers.
+    return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27;
+}
+
 static int64_t wq_query(NSString *target, BOOL altFlags)
 {
     NSString *group = wq_app_group();
@@ -256,9 +264,12 @@ BOOL wq_grant(NSString *path)
         [gGrantLock unlock];
         return NO;  // worse_query needs an existing target
     }
-    int64_t handle = wq_query(key, NO);
+    // iOS 26 needs the alternative query flags; try the likely ones first so
+    // a grant costs one query, and the other set only when that fails.
+    BOOL altFirst = !wq_system_areas_reachable();
+    int64_t handle = wq_query(key, altFirst);
     if (handle < 0 && handle != -1 && handle != -2) {
-        int64_t alt = wq_query(key, YES);
+        int64_t alt = wq_query(key, !altFirst);
         if (alt >= 0) handle = alt;
     }
     if (handle >= 0) {  // failures are retried next time

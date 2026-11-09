@@ -608,10 +608,13 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
         }
         if (cancellation.isCancelled) return;
         unsigned long long crash = 0;
-        BOOL safeCrashPath = WQCacheCrashPathIsSafe(kCrashLogsPath);
-        WQCacheMeasurementState crashState = safeCrashPath
-            ? WQCacheMeasureDirectory(kCrashLogsPath, cancellation, &crash)
-            : WQCacheMeasurementLimited;
+        // Crash logs are in a system group, which worse_query reaches on iOS 27
+        // only. On iOS 26 the section is left out instead of reported as limited.
+        BOOL crashReachable = wq_system_areas_reachable();
+        BOOL safeCrashPath = crashReachable && WQCacheCrashPathIsSafe(kCrashLogsPath);
+        WQCacheMeasurementState crashState = !crashReachable ? WQCacheMeasurementMissing
+            : safeCrashPath ? WQCacheMeasureDirectory(kCrashLogsPath, cancellation, &crash)
+                            : WQCacheMeasurementLimited;
         if (crashState == WQCacheMeasurementCancelled) return;
         if (crashState == WQCacheMeasurementLimited) {
             scanLimited = YES;

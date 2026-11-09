@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Builds WQFiles.ipa (arm64, ad-hoc signed with the App Group entitlement;
 # re-sign with your sideloading tool, keeping an App Group).
-# The app policy is iOS 27.0 or later; the SDK version is intentionally not the
+# The app policy is iOS 26.0 or later; the SDK version is intentionally not the
 # deployment target. Set WQFILES_FINAL_IPA to override the publication path.
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
-MINIMUM_IOS_VERSION=27.0
+MINIMUM_IOS_VERSION=26.0
 FINAL_IPA=${WQFILES_FINAL_IPA:-WQFiles.ipa}
 
 # Publish only after the host regression suite passes. The packaged artifact
