@@ -45,6 +45,10 @@ static inline int WQOpenRegularAt(int parent, const char *name, int flags, mode_
 {
     // Never allow truncation before the file type has been verified.
     if (flags & O_TRUNC) { errno = EINVAL; return -1; }
+    struct stat entry;
+    if (fstatat(parent, name, &entry, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!S_ISREG(entry.st_mode)) { errno = EINVAL; return -1; }
+    } else if (errno != ENOENT || !(flags & O_CREAT)) return -1;
     int fd = openat(parent, name, flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, mode);
     if (fd < 0) return -1;
     struct stat st = {0};
@@ -145,5 +149,65 @@ static inline BOOL WQCacheSwapBegin(int library, NSString *target)
     if (!durable || fsync(library) != 0) return NO;
     if (renameatx_np(library, "Caches", library, WQCacheSaved, RENAME_EXCL) != 0 || fsync(library) != 0) return NO;
     return symlinkat(target.fileSystemRepresentation, library, "Caches") == 0 && fsync(library) == 0;
+}
+
+static inline BOOL WQAbsolutePathGrammar(NSString *path)
+{
+    if (![path hasPrefix:@"/"] || path.length < 2 || [path rangeOfString:@"\0"].location != NSNotFound) return NO;
+    NSArray *parts = [path componentsSeparatedByString:@"/"];
+    for (NSUInteger i = 1; i < parts.count; i++) {
+        NSString *part = parts[i];
+        if (!part.length || [part isEqualToString:@"."] || [part isEqualToString:@".."]) return NO;
+    }
+    return YES;
+}
+
+static inline int WQCreateDirectoriesNoLinks(NSString *path)
+{
+    path = WQCanonicalVarPath(path);
+    if (!WQAbsolutePathGrammar(path)) { errno = EINVAL; return -1; }
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    for (NSString *part in [path componentsSeparatedByString:@"/"]) {
+        if (!part.length) continue;
+        int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (next < 0 && errno == ENOENT) {
+            if (mkdirat(fd, part.fileSystemRepresentation, 0700) != 0 && errno != EEXIST) { int err = errno; close(fd); errno = err; return -1; }
+            if (fsync(fd) != 0) { int err = errno; close(fd); errno = err; return -1; }
+            next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        }
+        int err = errno;
+        close(fd);
+        if (next < 0) { errno = err; return -1; }
+        fd = next;
+    }
+    return fd;
+}
+
+static inline BOOL WQBackupStampValid(NSString *stamp)
+{
+    // Recognize the historical second/millisecond stamps and the current
+    // millisecond-counter format. No arbitrary directory can become a restore.
+    NSString *pattern = @"^[0-9]{8}-[0-9]{6}(-[0-9]{3}(-[1-9][0-9]*)?)?$";
+    NSRange match = [stamp rangeOfString:pattern options:NSRegularExpressionSearch];
+    if (match.location != 0 || match.length != stamp.length) return NO;
+    NSArray *parts = [stamp componentsSeparatedByString:@"-"];
+    if (parts.count == 4) {
+        uint64_t number = 0;
+        for (NSUInteger i = 0; i < [parts[3] length]; i++) {
+            unsigned digit = [parts[3] characterAtIndex:i] - '0';
+            if (number > (UINT64_MAX - digit) / 10) return NO;
+            number = number * 10 + digit;
+        }
+    }
+    NSDateFormatter *fmt = [NSDateFormatter new];
+    fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    fmt.calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    fmt.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    fmt.lenient = NO;
+    fmt.dateFormat = @"yyyyMMdd-HHmmss";
+    NSString *datePart = [stamp substringToIndex:15];
+    NSDate *date = [fmt dateFromString:datePart];
+    return date && [[fmt stringFromDate:date] isEqualToString:datePart];
 }
 #endif

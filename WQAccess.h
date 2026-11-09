@@ -35,7 +35,11 @@ NSDictionary<NSString *, NSNumber *> *_Nullable wq_file_version(NSString *path);
 
 // Overwrites a file in place (same inode, owner and xattrs). The previous
 // contents are backed up first, and a failed write attempts to roll back.
-// The _if_unchanged forms refuse to overwrite a file modified since `expected`.
+// Mutation/backup/rollback use one verified regular-file descriptor and an
+// advisory lock where supported. The _if_unchanged forms reject a stale expected
+// version before mutation; nil keeps the legacy unconditional behavior. This is
+// not an atomic transaction against uncooperative external writers or crashes.
+// Backup-storage files cannot be overwritten/deleted through these generic APIs.
 BOOL wq_write(NSString *path, NSData *data, NSString *_Nullable *_Nullable errorText);
 BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary<NSString *, NSNumber *> *_Nullable expected,
                            NSString *_Nullable *_Nullable errorText);

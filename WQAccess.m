@@ -264,8 +264,19 @@ static BOOL wq_is_denied(int err) { return err == EPERM || err == EACCES; }
 
 #pragma mark - Backups
 
+#ifdef WQ_ACCESS_TESTING
+static NSString *wq_test_backup_root;
+static void (^wq_test_mutation_hook)(NSString *stage, NSString *path);
+#define WQ_MUTATION_HOOK(stage, path) do { if (wq_test_mutation_hook) wq_test_mutation_hook(stage, path); } while (0)
+#else
+#define WQ_MUTATION_HOOK(stage, path) do {} while (0)
+#endif
+
 NSString *wq_backup_root(void)
 {
+#ifdef WQ_ACCESS_TESTING
+    if (wq_test_backup_root) return wq_test_backup_root;
+#endif
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     return [docs stringByAppendingPathComponent:@"Backups"];
 }
@@ -322,108 +333,190 @@ static BOOL wq_copy_file_out(NSString *path, NSString *dest, NSString **errorTex
     return ok;
 }
 
-// Backups/<yyyyMMdd-HHmmss-SSS-n>/<original absolute path>. The stamp is
-// unique per operation, so two saves in the same second never collide. Writes
-// in our own container use a private temporary rollback copy instead.
-static BOOL wq_backup(NSString *path, NSString **backupPath)
+// Always durable, including own files. Safety artifacts themselves are protected
+// from generic overwrite/delete: recursively backing up Backups is unbounded.
+static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath)
 {
-    BOOL own = wq_is_own(path);
-    if (own && !backupPath) return YES;
-    NSString *dest = nil;
-    if (own) {
-        dest = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                [@"wq-rollback-" stringByAppendingString:NSUUID.UUID.UUIDString]];
-    } else {
-        static NSDateFormatter *fmt;
-        static int counter;
-        static NSLock *lock;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{
-            fmt = [NSDateFormatter new];
-            fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-            fmt.dateFormat = @"yyyyMMdd-HHmmss-SSS";
-            lock = [NSLock new];
-        });
-        [lock lock];
-        NSString *stamp = [NSString stringWithFormat:@"%@-%d", [fmt stringFromDate:NSDate.date], ++counter];
-        [lock unlock];
-        dest = [[wq_backup_root() stringByAppendingPathComponent:stamp] stringByAppendingPathComponent:wq_norm(path)];
-    }
-    NSError *dirError = nil;
-    if (![NSFileManager.defaultManager createDirectoryAtPath:dest.stringByDeletingLastPathComponent
-                                 withIntermediateDirectories:YES attributes:nil error:&dirError]) {
-        wq_log(@"backup: cannot create folder for %@: %@", path, dirError);
+    NSString *original = WQCanonicalVarPath(path);
+    NSString *root = WQCanonicalVarPath(wq_backup_root());
+    if (!WQAbsolutePathGrammar(original) || [original isEqualToString:root] ||
+        [original hasPrefix:[root stringByAppendingString:@"/"]]) {
+        wq_log(@"backup: refusing invalid path or mutation of backup storage: %@", path);
         return NO;
     }
+    static NSDateFormatter *fmt;
+    static uint64_t counter;
+    static NSLock *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fmt = [NSDateFormatter new];
+        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        fmt.calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        fmt.dateFormat = @"yyyyMMdd-HHmmss-SSS";
+        lock = [NSLock new];
+    });
+    [lock lock];
+    NSString *stamp = counter == UINT64_MAX ? nil :
+        [NSString stringWithFormat:@"%@-%llu", [fmt stringFromDate:NSDate.date], (unsigned long long)++counter];
+    [lock unlock];
+    if (!stamp) return NO;
+    NSString *dest = [[root stringByAppendingPathComponent:stamp] stringByAppendingString:original];
+    int parent = WQCreateDirectoriesNoLinks(dest.stringByDeletingLastPathComponent);
+    if (parent < 0) return NO;
+    int out = WQOpenRegularAt(parent, dest.lastPathComponent.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (out < 0) { close(parent); return NO; }
     NSString *error = nil;
-    BOOL ok = wq_copy_file_out(path, dest, &error);
-    wq_log(@"backup: %@ -> %@", path, ok ? dest : [@"FAILED: " stringByAppendingString:error ?: @"?"]);
+    BOOL ok = lseek(fd, 0, SEEK_SET) >= 0 && wq_stream(fd, out, &error);
+    if (close(out) != 0) ok = NO;
+    if (ok && fsync(parent) != 0) ok = NO;
+    if (!ok) unlinkat(parent, dest.lastPathComponent.fileSystemRepresentation, 0);
+    close(parent);
+    wq_log(@"backup: %@ -> %@", path, ok ? dest : error ?: @"FAILED");
     if (ok && backupPath) *backupPath = dest;
     return ok;
 }
 
-// Restores the backup through the normal access path. This deliberately keeps
-// the destination inode and metadata, just like the original in-place write.
-static BOOL wq_restore_backup(NSString *path, NSString *backup, NSString **errorText)
-{
-    int in = open(backup.fileSystemRepresentation, O_RDONLY);
-    if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
-    int out = wq_open(path, O_WRONLY | O_TRUNC, 0);
-    if (out < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
-    BOOL ok = wq_stream(in, out, errorText);
-    int saved = errno;
-    close(in);
-    if (close(out) != 0 && ok) { ok = NO; if (errorText) *errorText = wq_errno(errno); }
-    if (!ok && errorText && !*errorText) *errorText = wq_errno(saved);
-    return ok;
-}
-
-static void wq_report_write_failure(NSString *path, NSString *backup, NSString *failure, NSString **errorText)
-{
-    NSString *rollbackError = nil;
-    BOOL restored = backup && wq_restore_backup(path, backup, &rollbackError);
-    NSString *message = restored
-        ? [NSString stringWithFormat:@"%@; the original contents were restored", failure]
-        : [NSString stringWithFormat:@"%@; rollback %@. Backup: %@", failure,
-           backup ? [@"also failed: " stringByAppendingString:rollbackError ?: @"unknown error"] : @"was unavailable",
-           backup ?: @"none"];
-    wq_log(@"write failure: %@ -> %@", path, message);
-    if (errorText) *errorText = message;
-}
-
-static void wq_discard_temporary_backup(NSString *path, NSString *backup)
-{
-    if (backup && wq_is_own(path)) [NSFileManager.defaultManager removeItemAtPath:backup error:nil];
-}
-
 NSString *wq_backup_original_path(NSString *backupPath)
 {
-    NSString *root = [wq_norm(wq_backup_root()) stringByAppendingString:@"/"];
-    NSString *p = wq_norm(backupPath);
+    // Validate raw components before normalization, so traversal is never hidden.
+    if (!WQAbsolutePathGrammar(backupPath)) return nil;
+    NSString *root = [WQCanonicalVarPath(wq_backup_root()) stringByAppendingString:@"/"];
+    NSString *p = WQCanonicalVarPath(backupPath);
     if (![p hasPrefix:root]) return nil;
     NSArray *parts = [[p substringFromIndex:root.length] componentsSeparatedByString:@"/"];
-    if (parts.count < 3) return nil;  // <stamp>/private/...
-    return [@"/" stringByAppendingString:[[parts subarrayWithRange:NSMakeRange(1, parts.count - 1)] componentsJoinedByString:@"/"]];
+    if (parts.count < 2 || !WQBackupStampValid(parts[0])) return nil;
+    NSString *original = [@"/" stringByAppendingString:[[parts subarrayWithRange:NSMakeRange(1, parts.count - 1)] componentsJoinedByString:@"/"]];
+    return WQAbsolutePathGrammar(original) ? original : nil;
 }
 
 #pragma mark - File operations
+
+static NSDictionary<NSString *, NSNumber *> *wq_version_for_stat(const struct stat *st)
+{
+    return @{ @"device": @(st->st_dev), @"inode": @(st->st_ino), @"size": @(st->st_size),
+              @"modifiedSeconds": @(st->st_mtimespec.tv_sec), @"modifiedNanoseconds": @(st->st_mtimespec.tv_nsec),
+              @"changedSeconds": @(st->st_ctimespec.tv_sec), @"changedNanoseconds": @(st->st_ctimespec.tv_nsec) };
+}
 
 NSDictionary<NSString *, NSNumber *> *wq_file_version(NSString *path)
 {
     struct stat st;
     if (!wq_stat(path, &st) || !S_ISREG(st.st_mode)) return nil;
-    return @{ @"device": @(st.st_dev), @"inode": @(st.st_ino), @"size": @(st.st_size),
-              @"modifiedSeconds": @(st.st_mtimespec.tv_sec), @"modifiedNanoseconds": @(st.st_mtimespec.tv_nsec),
-              @"changedSeconds": @(st.st_ctimespec.tv_sec), @"changedNanoseconds": @(st.st_ctimespec.tv_nsec) };
+    return wq_version_for_stat(&st);
 }
 
-static BOOL wq_version_is_current(NSString *path, NSDictionary *expected, NSString **errorText)
+static BOOL wq_changed(NSString **errorText)
 {
-    if (!expected) return YES;
-    NSDictionary *current = wq_file_version(path);
-    if ([current isEqualToDictionary:expected]) return YES;
     if (errorText) *errorText = @"The file changed after it was opened. Your edits were not written; reopen it and compare the changes.";
     return NO;
+}
+
+typedef struct {
+    int fd;
+    int parent;
+    struct stat before;
+} WQMutation;
+
+static void wq_mutation_close(WQMutation *mutation)
+{
+    if (mutation->fd >= 0) close(mutation->fd);
+    if (mutation->parent >= 0) close(mutation->parent);
+    mutation->fd = mutation->parent = -1;
+}
+
+// Revalidate the descriptor, directory entry, and the current parent path. A
+// pathname swap never redirects backup, mutation, or rollback to the new inode.
+static BOOL wq_mutation_current(NSString *path, WQMutation *mutation, BOOL version, NSString **errorText)
+{
+    struct stat current, entry, parent, currentParent;
+    int checkParent = WQOpenDirectoryNoLinks(path.stringByDeletingLastPathComponent);
+    BOOL ok = checkParent >= 0 && fstat(checkParent, &currentParent) == 0 &&
+        fstat(mutation->parent, &parent) == 0 && WQSameObject(&parent, &currentParent) &&
+        fstat(mutation->fd, &current) == 0 && S_ISREG(current.st_mode) &&
+        fstatat(mutation->parent, path.lastPathComponent.fileSystemRepresentation, &entry, AT_SYMLINK_NOFOLLOW) == 0 &&
+        S_ISREG(entry.st_mode) && WQSameObject(&entry, &current) && WQSameObject(&current, &mutation->before);
+    if (checkParent >= 0) close(checkParent);
+    if (ok && version) ok = [wq_version_for_stat(&current) isEqualToDictionary:wq_version_for_stat(&mutation->before)];
+    return ok ? YES : wq_changed(errorText);
+}
+
+static BOOL wq_mutation_open(NSString *path, NSDictionary *expected, WQMutation *mutation, int flags, NSString **errorText)
+{
+    *mutation = (WQMutation){ .fd = -1, .parent = -1 };
+    if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path))) { if (errorText) *errorText = @"Invalid file path"; return NO; }
+    NSString *parent = path.stringByDeletingLastPathComponent;
+    mutation->parent = WQOpenDirectoryNoLinks(parent);
+    if (mutation->parent < 0 && wq_is_denied(errno) && wq_grant(parent)) mutation->parent = WQOpenDirectoryNoLinks(parent);
+    if (mutation->parent >= 0) {
+        mutation->fd = WQOpenRegularAt(mutation->parent, path.lastPathComponent.fileSystemRepresentation, flags, 0);
+        if (mutation->fd < 0 && wq_is_denied(errno) && wq_grant(path))
+            mutation->fd = WQOpenRegularAt(mutation->parent, path.lastPathComponent.fileSystemRepresentation, flags, 0);
+    }
+    if (mutation->fd < 0) { if (errorText) *errorText = wq_errno(errno); wq_mutation_close(mutation); return NO; }
+    if (flock(mutation->fd, LOCK_EX | LOCK_NB) != 0) {
+        int err = errno;
+        // Some providers do not implement locks. Keep descriptor/version checks;
+        // this is advisory serialization, not atomicity against other writers.
+        if (err != ENOTSUP && err != EOPNOTSUPP && err != ENOSYS) {
+            if (errorText) *errorText = wq_errno(err);
+            wq_mutation_close(mutation); return NO;
+        }
+        wq_log(@"advisory locking unsupported: %@", path);
+    }
+    if (fstat(mutation->fd, &mutation->before) != 0 ||
+        (expected && ![wq_version_for_stat(&mutation->before) isEqualToDictionary:expected]) ||
+        !wq_mutation_current(path, mutation, YES, errorText)) {
+        wq_changed(errorText); wq_mutation_close(mutation); return NO;
+    }
+    WQ_MUTATION_HOOK(@"verified", path);
+    return YES;
+}
+
+static BOOL wq_mutation_backup(NSString *path, WQMutation *mutation, NSString **backup, NSString **errorText)
+{
+    if (!wq_mutation_current(path, mutation, YES, errorText)) return NO;
+    if (!wq_backup_fd(path, mutation->fd, backup)) {
+        if (errorText) *errorText = @"Backup of the current file failed, nothing was written (backup storage cannot be overwritten or deleted)";
+        return NO;
+    }
+    WQ_MUTATION_HOOK(@"backedUp", path);
+    return wq_mutation_current(path, mutation, YES, errorText);
+}
+
+static BOOL wq_restore_backup_fd(WQMutation *mutation, NSString *backup, NSString **errorText)
+{
+    int in = WQOpenRegularAt(AT_FDCWD, backup.fileSystemRepresentation, O_RDONLY, 0);
+    if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    // This is still the original, locked descriptor, never a reopened pathname.
+    BOOL ok = lseek(mutation->fd, 0, SEEK_SET) >= 0 && ftruncate(mutation->fd, 0) == 0 &&
+        wq_stream(in, mutation->fd, errorText);
+    close(in);
+    return ok;
+}
+
+static BOOL wq_mutation_finish(NSString *path, WQMutation *mutation, NSString *backup, BOOL ok,
+                               NSString *failure, NSString **errorText)
+{
+    if (ok && fsync(mutation->fd) != 0) { ok = NO; failure = wq_errno(errno); }
+    WQ_MUTATION_HOOK(@"written", path);
+    if (ok && !wq_mutation_current(path, mutation, NO, errorText)) {
+        ok = NO; failure = @"The target path was replaced during writing";
+    }
+    if (!ok) {
+        NSString *rollbackError = nil;
+        BOOL restored = backup && wq_restore_backup_fd(mutation, backup, &rollbackError);
+        if (errorText) *errorText = [NSString stringWithFormat:@"%@; %@. Backup: %@", failure ?: @"Write failed",
+            restored ? @"the original descriptor contents were restored" : [@"rollback failed: " stringByAppendingString:rollbackError ?: @"unknown error"], backup ?: @"none"];
+    }
+    // Rollback must finish before close releases the lock. A close failure has
+    // no safe reopen/rollback path; retain the durable backup and report it.
+    if (close(mutation->fd) != 0 && ok) {
+        ok = NO;
+        if (errorText) *errorText = [NSString stringWithFormat:@"Close failed: %@. Backup: %@", wq_errno(errno), backup];
+    }
+    mutation->fd = -1;
+    wq_mutation_close(mutation);
+    return ok;
 }
 
 NSArray<NSString *> *wq_list(NSString *dir, NSString **errorText)
@@ -437,14 +530,15 @@ NSArray<NSString *> *wq_list(NSString *dir, NSString **errorText)
 
 static int wq_open(NSString *path, int flags, mode_t mode)
 {
-    int fd = open(path.fileSystemRepresentation, flags, mode);
+    if (flags & O_TRUNC) { errno = EINVAL; return -1; }
+    int fd = WQOpenRegularAt(AT_FDCWD, path.fileSystemRepresentation, flags, mode);
     if (fd >= 0 || !wq_is_denied(errno)) return fd;
     // The file's own folder first, then the file itself.
     if (wq_grant(path.stringByDeletingLastPathComponent)) {
-        fd = open(path.fileSystemRepresentation, flags, mode);
+        fd = WQOpenRegularAt(AT_FDCWD, path.fileSystemRepresentation, flags, mode);
         if (fd >= 0 || !wq_is_denied(errno)) return fd;
     }
-    if (!(flags & O_CREAT) && wq_grant(path)) fd = open(path.fileSystemRepresentation, flags, mode);
+    if (!(flags & O_CREAT) && wq_grant(path)) fd = WQOpenRegularAt(AT_FDCWD, path.fileSystemRepresentation, flags, mode);
     if (fd < 0) {
         // Say why: a sandbox refusal (EPERM) and plain Unix permissions
         // (EACCES: owner/mode don't allow it) need different fixes.
@@ -513,25 +607,13 @@ static BOOL wq_finish_fd(int fd, BOOL ok, int *err)
 
 BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary<NSString *, NSNumber *> *expected, NSString **errorText)
 {
-    if (!wq_version_is_current(path, expected, errorText)) return NO;
+    WQMutation mutation;
+    if (!wq_mutation_open(path, expected, &mutation, O_RDWR, errorText)) return NO;
     NSString *backup = nil;
-    if (!wq_backup(path, &backup)) {
-        if (errorText) *errorText = @"Backup of the current file failed, nothing was written";
-        return NO;
-    }
-    int fd = wq_open(path, O_WRONLY | O_TRUNC, 0);
-    if (fd < 0) {
-        if (errorText) *errorText = wq_errno(errno);
-        wq_discard_temporary_backup(path, backup);
-        return NO;
-    }
-    BOOL ok = wq_write_all(fd, data);
-    int err = errno;
-    ok = wq_finish_fd(fd, ok, &err);
-    wq_log(@"write: %@ (%lu bytes) -> %@", path, (unsigned long)data.length, ok ? @"OK" : wq_errno(err));
-    if (!ok) wq_report_write_failure(path, backup, wq_errno(err), errorText);
-    else wq_discard_temporary_backup(path, backup);
-    return ok;
+    if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { wq_mutation_close(&mutation); return NO; }
+    BOOL ok = lseek(mutation.fd, 0, SEEK_SET) >= 0 && ftruncate(mutation.fd, 0) == 0 && wq_write_all(mutation.fd, data);
+    NSString *failure = ok ? nil : wq_errno(errno);
+    return wq_mutation_finish(path, &mutation, backup, ok, failure, errorText);
 }
 
 BOOL wq_write(NSString *path, NSData *data, NSString **errorText)
@@ -541,34 +623,27 @@ BOOL wq_write(NSString *path, NSData *data, NSString **errorText)
 
 BOOL wq_write_from_file(NSString *path, NSString *source, NSString **errorText)
 {
-    int in = open(source.fileSystemRepresentation, O_RDONLY);
+    int in = WQOpenRegularAt(AT_FDCWD, source.fileSystemRepresentation, O_RDONLY, 0);
     if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    WQMutation mutation;
+    if (!wq_mutation_open(path, nil, &mutation, O_RDWR, errorText)) { close(in); return NO; }
+    struct stat src;
+    if (fstat(in, &src) != 0 || WQSameObject(&src, &mutation.before)) {
+        if (errorText) *errorText = @"Source and destination are the same file";
+        close(in); wq_mutation_close(&mutation); return NO;
+    }
     NSString *backup = nil;
-    if (!wq_backup(path, &backup)) {
-        close(in);
-        if (errorText) *errorText = @"Backup of the current file failed, nothing was written";
-        return NO;
-    }
-    int fd = wq_open(path, O_WRONLY | O_TRUNC, 0);
-    if (fd < 0) {
-        if (errorText) *errorText = wq_errno(errno);
-        close(in);
-        wq_discard_temporary_backup(path, backup);
-        return NO;
-    }
+    if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { close(in); wq_mutation_close(&mutation); return NO; }
     NSString *error = nil;
-    BOOL ok = wq_stream(in, fd, &error);
+    BOOL ok = lseek(mutation.fd, 0, SEEK_SET) >= 0 && ftruncate(mutation.fd, 0) == 0 && wq_stream(in, mutation.fd, &error);
+    if (!ok && !error) error = wq_errno(errno);
     close(in);
-    if (close(fd) != 0 && ok) { ok = NO; error = wq_errno(errno); }
-    wq_log(@"write: %@ from %@ -> %@", path, source.lastPathComponent, ok ? @"OK" : error);
-    if (!ok) wq_report_write_failure(path, backup, error ?: @"Write failed", errorText);
-    else wq_discard_temporary_backup(path, backup);
-    return ok;
+    return wq_mutation_finish(path, &mutation, backup, ok, error, errorText);
 }
 
 BOOL wq_create_file_from(NSString *path, NSString *source, NSString **errorText)
 {
-    int in = open(source.fileSystemRepresentation, O_RDONLY);
+    int in = WQOpenRegularAt(AT_FDCWD, source.fileSystemRepresentation, O_RDONLY, 0);
     if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
     int fd = wq_open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
@@ -624,51 +699,30 @@ NSData *wq_read_range(NSString *path, unsigned long long offset, NSUInteger leng
 BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
                            NSDictionary<NSString *, NSNumber *> *expected, NSString **errorText)
 {
-    if (!wq_version_is_current(path, expected, errorText)) return NO;
-    struct stat before;
-    if (!wq_stat(path, &before) || !S_ISREG(before.st_mode)) {
-        if (errorText) *errorText = @"Not a regular file";
-        return NO;
-    }
-    unsigned long long size = (unsigned long long)before.st_size;
+    WQMutation mutation;
+    if (!wq_mutation_open(path, expected, &mutation, O_RDWR, errorText)) return NO;
+    unsigned long long size = (unsigned long long)mutation.before.st_size;
     for (NSNumber *off in runs) {
-        unsigned long long start = off.unsignedLongLongValue;
-        if (!WQPatchRangeValid(start, runs[off].length, size)) {
+        if (!WQPatchRangeValid(off.unsignedLongLongValue, runs[off].length, size)) {
             if (errorText) *errorText = @"A change lies past the end of the file";
-            return NO;
+            wq_mutation_close(&mutation); return NO;
         }
     }
     NSString *backup = nil;
-    if (!wq_backup(path, &backup)) {
-        if (errorText) *errorText = @"Backup of the current file failed, nothing was written";
-        return NO;
-    }
-    int fd = wq_open(path, O_WRONLY, 0);
-    if (fd < 0) {
-        if (errorText) *errorText = wq_errno(errno);
-        wq_discard_temporary_backup(path, backup);
-        return NO;
-    }
+    if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { wq_mutation_close(&mutation); return NO; }
     BOOL ok = YES;
     int err = 0;
-    NSUInteger bytes = 0;
     for (NSNumber *off in [runs.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
         NSData *run = runs[off];
-        for (NSUInteger done = 0; ok && done < run.length; ) {
-            ssize_t n = pwrite(fd, (const uint8_t *)run.bytes + done, run.length - done, (off_t)(off.unsignedLongLongValue + done));
+        for (NSUInteger done = 0; done < run.length; ) {
+            ssize_t n = pwrite(mutation.fd, (const uint8_t *)run.bytes + done, run.length - done, (off_t)(off.unsignedLongLongValue + done));
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) { ok = NO; err = n == 0 ? EIO : errno; break; }
             done += (NSUInteger)n;
         }
         if (!ok) break;
-        bytes += run.length;
     }
-    ok = wq_finish_fd(fd, ok, &err);
-    wq_log(@"patch: %@ (%lu bytes in %lu runs) -> %@", path, (unsigned long)bytes, (unsigned long)runs.count,
-           ok ? @"OK" : wq_errno(err));
-    if (!ok) wq_report_write_failure(path, backup, wq_errno(err), errorText);
-    else wq_discard_temporary_backup(path, backup);
-    return ok;
+    return wq_mutation_finish(path, &mutation, backup, ok, ok ? nil : wq_errno(err), errorText);
 }
 
 BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString **errorText)
@@ -716,9 +770,18 @@ BOOL wq_delete(NSString *path, NSString **errorText)
         if (rc != 0 && wq_is_denied(errno) && wq_grant(path.stringByDeletingLastPathComponent))
             rc = rmdir(path.fileSystemRepresentation);
     } else {
-        if (S_ISREG(st.st_mode) && !wq_backup(path, NULL)) {
-            if (errorText) *errorText = @"Backup failed, nothing was deleted";
-            return NO;
+        if (S_ISREG(st.st_mode)) {
+            WQMutation mutation;
+            if (!wq_mutation_open(path, wq_version_for_stat(&st), &mutation, O_RDONLY, errorText)) return NO;
+            NSString *backup = nil;
+            if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { wq_mutation_close(&mutation); return NO; }
+            // unlinkat remains conditional only on this final check, not atomic
+            // against an uncooperative directory-entry replacement.
+            rc = unlinkat(mutation.parent, path.lastPathComponent.fileSystemRepresentation, 0);
+            int err = errno;
+            wq_mutation_close(&mutation);
+            if (rc != 0 && errorText) *errorText = wq_errno(err);
+            return rc == 0;
         }
         rc = unlink(path.fileSystemRepresentation);
         if (rc != 0 && wq_is_denied(errno) && wq_grant(path.stringByDeletingLastPathComponent))

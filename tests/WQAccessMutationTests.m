@@ -1,0 +1,115 @@
+// Compile the real implementation with temp-only backup storage and test barriers.
+// Entitlement stubs guarantee that these fixtures cannot issue sandbox tokens.
+#define WQ_ACCESS_TESTING 1
+#import "../WQAccess.m"
+#include <stdlib.h>
+SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator) { (void)allocator; return NULL; }
+CFTypeRef SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef entitlement, CFErrorRef *error)
+{ (void)task; (void)entitlement; (void)error; return NULL; }
+
+static void check(BOOL ok, NSString *name)
+{
+    if (!ok) { fprintf(stderr, "FAIL: %s (errno %d)\n", name.UTF8String, errno); exit(1); }
+    printf("PASS: %s\n", name.UTF8String);
+}
+static NSData *bytes(NSString *text) { return [text dataUsingEncoding:NSUTF8StringEncoding]; }
+static void put(NSString *path, NSString *text) { check([bytes(text) writeToFile:path atomically:YES], @"write temp file"); }
+static BOOL has(NSString *path, NSString *text) { return [[NSData dataWithContentsOfFile:path] isEqual:bytes(text)]; }
+static NSArray<NSString *> *backups(void)
+{
+    NSMutableArray *result = [NSMutableArray new];
+    for (NSString *rel in [NSFileManager.defaultManager enumeratorAtPath:wq_test_backup_root]) {
+        NSString *path = [wq_test_backup_root stringByAppendingPathComponent:rel];
+        struct stat st;
+        if (lstat(path.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode)) [result addObject:path];
+    }
+    return result;
+}
+
+int main(void)
+{
+    @autoreleasepool {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *base = [WQCanonicalVarPath(NSTemporaryDirectory().stringByResolvingSymlinksInPath) stringByAppendingPathComponent:
+                          [@"WQAccessMutationTests-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        check([fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil], @"create temp fixture");
+        wq_test_backup_root = [base stringByAppendingPathComponent:@"Backups"];
+        @try {
+            NSString *file = [base stringByAppendingPathComponent:@"file"];
+            NSString *error = nil;
+            put(file, @"original");
+            NSDictionary *version = wq_file_version(file);
+            struct stat identity;
+            check(wq_stat(file, &identity), @"capture original identity");
+            check(wq_write_if_unchanged(file, bytes(@"new"), version, &error), @"conditional write succeeds");
+            check(has(file, @"new") && backups().count == 1, @"overwrite retains durable backup");
+            NSString *backup = backups().firstObject;
+            check(has(backup, @"original") && [wq_backup_original_path(backup) isEqual:file], @"backup maps to original and contains old bytes");
+            struct stat after;
+            check(wq_stat(file, &after) && WQSameObject(&identity, &after), @"write keeps inode");
+            check(!wq_write_if_unchanged(file, bytes(@"stale"), version, &error) && has(file, @"new"), @"stale version rejects without truncation");
+            check(wq_write_from_file(file, backup, &error) && has(file, @"original"), @"existing valid backup restores");
+            check(!wq_write_from_file(file, file, &error) && has(file, @"original"), @"streamed self-write rejected");
+            check(!wq_write(backup, bytes(@"bad"), &error) && has(backup, @"original"), @"backup storage overwrite refused without recursive backup");
+            check(!wq_delete(backup, &error) && has(backup, @"original"), @"backup storage delete refused");
+            check(wq_delete(file, &error) && ![fm fileExistsAtPath:file] && backups().count == 3, @"regular delete retains durable backup");
+
+            // Deterministic version change after descriptor verification, before backup.
+            put(file, @"original");
+            version = wq_file_version(file);
+            wq_test_mutation_hook = ^(NSString *stage, NSString *path) {
+                if ([stage isEqual:@"verified"]) put(path, @"concurrent");
+            };
+            check(!wq_write_if_unchanged(file, bytes(@"bad"), version, &error) && has(file, @"concurrent"), @"write rejects pathname replacement after verification");
+            wq_test_mutation_hook = nil;
+            put(file, @"original"); version = wq_file_version(file);
+            wq_test_mutation_hook = ^(NSString *stage, NSString *path) {
+                if ([stage isEqual:@"backedUp"]) {
+                    int fd = open(path.fileSystemRepresentation, O_WRONLY | O_TRUNC);
+                    check(fd >= 0 && WQWriteBytes(fd, bytes(@"concurrent")), @"inject uncooperative same-inode write");
+                    close(fd);
+                }
+            };
+            check(!wq_patch_if_unchanged(file, @{ @0: bytes(@"bad") }, version, &error) && has(file, @"concurrent"), @"patch rejects same-inode change after backup");
+            wq_test_mutation_hook = nil;
+            put(file, @"original"); version = wq_file_version(file);
+            NSString *detached = [base stringByAppendingPathComponent:@"detached"];
+            wq_test_mutation_hook = ^(NSString *stage, NSString *path) {
+                if ([stage isEqual:@"written"]) {
+                    check(rename(path.fileSystemRepresentation, detached.fileSystemRepresentation) == 0, @"inject target rename during finish");
+                    put(path, @"newer-target");
+                }
+            };
+            check(!wq_write_if_unchanged(file, bytes(@"changed"), version, &error), @"target swap during finish reports failure");
+            check(has(file, @"newer-target") && has(detached, @"original"), @"rollback restores only pinned inode, not replacement");
+            wq_test_mutation_hook = nil;
+            int locked = open(file.fileSystemRepresentation, O_RDWR);
+            check(locked >= 0 && flock(locked, LOCK_EX | LOCK_NB) == 0, @"hold cooperating writer lock");
+            check(!wq_write(file, bytes(@"bad"), &error) && has(file, @"newer-target"), @"mutation refuses another writer lock");
+            close(locked);
+            check(wq_patch(file, @{ @0: bytes(@"NEW") }, &error) && has(file, @"NEWer-target"), @"valid patch keeps size and remaining bytes");
+            check(!wq_patch(file, @{ @999: bytes(@"bad") }, &error), @"out-of-range patch refused");
+
+            NSString *fifo = [base stringByAppendingPathComponent:@"fifo"];
+            check(mkfifo(fifo.fileSystemRepresentation, 0600) == 0, @"create temp FIFO");
+            check(!wq_read(fifo, 0, &error) && !wq_read_range(fifo, 0, 10, &error), @"FIFO reads return without blocking");
+            check(!wq_write(fifo, bytes(@"bad"), &error), @"FIFO write refused");
+            check(!wq_read(base, 0, &error), @"directory read refused");
+            NSString *link = [base stringByAppendingPathComponent:@"link"];
+            check(symlink(file.fileSystemRepresentation, link.fileSystemRepresentation) == 0, @"create final symlink fixture");
+            check(!wq_write(link, bytes(@"bad"), &error) && has(file, @"NEWer-target"), @"symlink mutation refused");
+
+            check(WQBackupStampValid(@"20261109-203000-123-11") && WQBackupStampValid(@"20261109-203000"), @"current and historical stamps accepted");
+            for (NSString *stamp in @[@"garbage", @"20261309-203000-123-1", @"20260230-203000-123-1", @"20261109-253000-123-1", @"20261109-203000-123-0", @"20261109-203000-123-01", @"20261109-203000-123-18446744073709551616"]) {
+                check(!WQBackupStampValid(stamp), @"malformed stamp rejected");
+            }
+            check(!wq_backup_original_path([wq_test_backup_root stringByAppendingPathComponent:@"garbage/private/var/file"]), @"arbitrary stamp cannot supply restore path");
+            check(!wq_backup_original_path([wq_test_backup_root stringByAppendingString:@"/20261109-203000-123-1/private/var/../file"]), @"raw traversal restore path rejected");
+        } @finally {
+            wq_test_mutation_hook = nil;
+            wq_test_backup_root = nil;
+            [fm removeItemAtPath:base error:nil];
+        }
+    }
+    return 0;
+}
