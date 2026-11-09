@@ -14,6 +14,7 @@
 
 #import "WQAccess.h"
 #import "WQCore.h"
+#import "WQAccessSafety.h"
 #import <dlfcn.h>
 #import <errno.h>
 #import <fcntl.h>
@@ -111,22 +112,10 @@ typedef void (*cq_free_fn)(void *);
 typedef char *(*cq_token_fn)(void *);
 typedef int64_t (*ext_consume_fn)(const char *);
 
-static void wq_restore_caches(NSURL *root)
-{
-    NSURL *caches = [root URLByAppendingPathComponent:@"Library/Caches"];
-    [NSFileManager.defaultManager removeItemAtURL:caches error:nil];
-    [NSFileManager.defaultManager createDirectoryAtURL:caches withIntermediateDirectories:YES attributes:nil error:nil];
-}
+static void wq_release_handle(int64_t handle);
 
-static int64_t wq_query(NSString *target, BOOL altFlags)
+static int64_t wq_query_token(NSString *group, BOOL altFlags)
 {
-    NSString *group = wq_app_group();
-    if (!group) return -1;
-    NSFileManager *files = NSFileManager.defaultManager;
-    NSURL *root = [files containerURLForSecurityApplicationGroupIdentifier:group];
-    if (!root) return -1;
-    NSString *caches = [root URLByAppendingPathComponent:@"Library/Caches"].path;
-
     static void *mgr;
     static cq_create_fn create;
     static cq_set_u64_fn setClass, setFlags, setPart;
@@ -152,28 +141,58 @@ static int64_t wq_query(NSString *target, BOOL altFlags)
 
     void *query = create();
     if (!query) return -3;
-    setClass(query, 7);  // app group container
-    xpc_object_t ident = xpc_string_create(group.UTF8String);
-    setGroups(query, ident);
-    setPart(query, 3);   // Library/Caches
-    setFlags(query, altFlags ? 0x0000000800000000ULL : 0x0000008000000000ULL);
-
-    // Our Library/Caches -> target: containermanagerd issues the token for it.
-    [files removeItemAtPath:caches error:nil];
-    if (![files createSymbolicLinkAtPath:caches withDestinationPath:target error:nil]) {
+    char *token = NULL;
+    @try {
+        setClass(query, 7);  // app group container
+        xpc_object_t ident = xpc_string_create(group.UTF8String);
+        setGroups(query, ident);
+        setPart(query, 3);   // Library/Caches
+        setFlags(query, altFlags ? 0x0000000800000000ULL : 0x0000008000000000ULL);
+        void *result = single(query);
+        token = result ? copyToken(result) : NULL;
+        int64_t handle = token ? consume(token) : (result ? -6 : -5);
+        return token && handle < 0 ? -7 : handle;
+    } @finally {
+        if (token) free(token);
         freeQuery(query);
-        wq_restore_caches(root);
+    }
+}
+
+static int64_t wq_query(NSString *target, BOOL altFlags)
+{
+    NSString *group = wq_app_group();
+    if (!group) return -1;
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSURL *root = [files containerURLForSecurityApplicationGroupIdentifier:group];
+    if (!root) return -1;
+    NSString *libraryPath = [root.path stringByAppendingPathComponent:@"Library"];
+    if (![files createDirectoryAtPath:libraryPath withIntermediateDirectories:YES attributes:nil error:nil]) return -4;
+    int library = WQOpenDirectoryNoLinks(libraryPath);
+    if (library < 0) return -4;
+    int lock = WQOpenRegularAt(library, ".wq-caches-lock", O_RDWR | O_CREAT, 0600);
+    if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0) {
+        if (lock >= 0) close(lock);
+        close(library);
         return -4;
     }
-    void *result = single(query);
-    char *token = result ? copyToken(result) : NULL;
-    int64_t handle = token ? consume(token) : (result ? -6 : -5);
-    if (token && handle < 0) {
-        handle = -7;
+    int64_t handle = -4;
+    @try {
+        // Keep the exact Caches swap point required by worse_query, but preserve
+        // its original inode and nested contents. Next acquisition recovers an
+        // interrupted swap from the durable marker, before doing another query.
+        if (WQCacheSwapBegin(library, target)) handle = wq_query_token(group, altFlags);
+    } @catch (NSException *exception) {
+        wq_log(@"token query exception: %@", exception.reason);
+        handle = -9;
+    } @finally {
+        if (!WQCacheSwapRecover(library)) {
+            wq_log(@"token cache recovery failed: %@; preserved contents retained", libraryPath);
+            if (handle >= 0) wq_release_handle(handle);
+            handle = -8;
+        }
+        close(lock);
+        close(library);
     }
-    if (token) free(token);
-    freeQuery(query);
-    wq_restore_caches(root);
     return handle;
 }
 

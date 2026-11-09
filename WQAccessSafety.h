@@ -1,0 +1,149 @@
+// Portable implementation helpers for WQAccess; no privileged access is performed here.
+#ifndef WQ_ACCESS_SAFETY_H
+#define WQ_ACCESS_SAFETY_H
+#import <Foundation/Foundation.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static inline BOOL WQSameObject(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
+}
+
+// Only Apple's documented /var alias is allowed. Do not standardize away '..'
+// before walking: every actual ancestor must be opened without following links.
+static inline NSString *WQCanonicalVarPath(NSString *path)
+{
+    if ([path isEqualToString:@"/var"] || [path hasPrefix:@"/var/"])
+        return [@"/private" stringByAppendingString:path];
+    return path;
+}
+
+static inline int WQOpenDirectoryNoLinks(NSString *path)
+{
+    path = WQCanonicalVarPath(path);
+    if (![path hasPrefix:@"/"] || [path rangeOfString:@"\0"].location != NSNotFound) { errno = EINVAL; return -1; }
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    for (NSString *part in [path componentsSeparatedByString:@"/"]) {
+        if (!part.length) continue;
+        if ([part isEqualToString:@"."] || [part isEqualToString:@".."]) { close(fd); errno = EINVAL; return -1; }
+        int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        int err = errno;
+        close(fd);
+        if (next < 0) { errno = err; return -1; }
+        fd = next;
+    }
+    return fd;
+}
+
+static inline int WQOpenRegularAt(int parent, const char *name, int flags, mode_t mode)
+{
+    // Never allow truncation before the file type has been verified.
+    if (flags & O_TRUNC) { errno = EINVAL; return -1; }
+    int fd = openat(parent, name, flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, mode);
+    if (fd < 0) return -1;
+    struct stat st = {0};
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        int err = errno;
+        if (!S_ISREG(st.st_mode)) err = EINVAL;
+        close(fd); errno = err; return -1;
+    }
+    return fd;
+}
+
+static inline BOOL WQWriteBytes(int fd, NSData *data)
+{
+    const uint8_t *bytes = data.bytes;
+    size_t done = 0;
+    while (done < data.length) {
+        ssize_t n = write(fd, bytes + done, data.length - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (n == 0) errno = EIO; return NO; }
+        done += (size_t)n;
+    }
+    return fsync(fd) == 0;
+}
+
+// A durable intent file precedes the rename. The preserved directory itself is
+// never removed. Recovery accepts only our exact symlink or the original inode.
+static const char *const WQCacheMarker = ".wq-caches-swap.plist";
+static const char *const WQCacheSaved = ".wq-caches-preserved";
+
+static inline BOOL WQCacheSwapRecover(int library)
+{
+    int marker = WQOpenRegularAt(library, WQCacheMarker, O_RDONLY, 0);
+    if (marker < 0) {
+        if (errno != ENOENT) return NO;
+        struct stat saved;
+        if (fstatat(library, WQCacheSaved, &saved, AT_SYMLINK_NOFOLLOW) == 0) { errno = EEXIST; return NO; }
+        return errno == ENOENT;
+    }
+    struct stat ms;
+    if (fstat(marker, &ms) != 0 || ms.st_size <= 0 || ms.st_size > 65536) { close(marker); errno = EINVAL; return NO; }
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)ms.st_size];
+    size_t done = 0;
+    while (done < data.length) {
+        ssize_t n = read(marker, (uint8_t *)data.mutableBytes + done, data.length - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(marker); errno = EIO; return NO; }
+        done += (size_t)n;
+    }
+    close(marker);
+    id record = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil];
+    if (![record isKindOfClass:NSDictionary.class] || ![record[@"Format"] isEqual:@1] ||
+        ![record[@"Device"] isKindOfClass:NSNumber.class] || ![record[@"Inode"] isKindOfClass:NSNumber.class] ||
+        ![record[@"Target"] isKindOfClass:NSString.class]) { errno = EINVAL; return NO; }
+    struct stat original = {0}, current = {0};
+    original.st_dev = [record[@"Device"] intValue];
+    original.st_ino = [record[@"Inode"] unsignedLongLongValue];
+    BOOL savedExists = fstatat(library, WQCacheSaved, &original, AT_SYMLINK_NOFOLLOW) == 0;
+    if (!savedExists && errno != ENOENT) return NO;
+    struct stat expected = {0};
+    expected.st_dev = [record[@"Device"] intValue];
+    expected.st_ino = [record[@"Inode"] unsignedLongLongValue];
+    if (savedExists && (!S_ISDIR(original.st_mode) || !WQSameObject(&original, &expected))) { errno = EINVAL; return NO; }
+    BOOL cachesExists = fstatat(library, "Caches", &current, AT_SYMLINK_NOFOLLOW) == 0;
+    if (!cachesExists && errno != ENOENT) return NO;
+    if (savedExists) {
+        if (cachesExists) {
+            char link[65536];
+            ssize_t n = S_ISLNK(current.st_mode) ? readlinkat(library, "Caches", link, sizeof(link) - 1) : -1;
+            if (n < 0) { errno = EEXIST; return NO; }
+            link[n] = 0;
+            if (![record[@"Target"] isEqualToString:[NSString stringWithUTF8String:link]]) { errno = EEXIST; return NO; }
+            if (unlinkat(library, "Caches", 0) != 0) return NO;
+        }
+        if (renameatx_np(library, WQCacheSaved, library, "Caches", RENAME_EXCL) != 0 || fsync(library) != 0) return NO;
+    } else if (!cachesExists || !S_ISDIR(current.st_mode) || !WQSameObject(&current, &expected)) {
+        errno = EINVAL; return NO;
+    }
+    if (unlinkat(library, WQCacheMarker, 0) != 0) return NO;
+    return fsync(library) == 0;
+}
+
+static inline BOOL WQCacheSwapBegin(int library, NSString *target)
+{
+    if (!WQCacheSwapRecover(library)) return NO;
+    struct stat st;
+    if (fstatat(library, "Caches", &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno != ENOENT || mkdirat(library, "Caches", 0755) != 0 ||
+            fstatat(library, "Caches", &st, AT_SYMLINK_NOFOLLOW) != 0) return NO;
+    }
+    if (!S_ISDIR(st.st_mode)) { errno = EINVAL; return NO; }
+    NSDictionary *record = @{ @"Format": @1, @"Device": @(st.st_dev), @"Inode": @(st.st_ino), @"Target": target };
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:record format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    if (!data) { errno = EINVAL; return NO; }
+    int marker = WQOpenRegularAt(library, WQCacheMarker, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (marker < 0) return NO;
+    BOOL durable = WQWriteBytes(marker, data);
+    if (close(marker) != 0) durable = NO;
+    if (!durable || fsync(library) != 0) return NO;
+    if (renameatx_np(library, "Caches", library, WQCacheSaved, RENAME_EXCL) != 0 || fsync(library) != 0) return NO;
+    return symlinkat(target.fileSystemRepresentation, library, "Caches") == 0 && fsync(library) == 0;
+}
+#endif
