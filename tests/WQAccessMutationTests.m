@@ -99,8 +99,41 @@ int main(void)
             check(symlink(file.fileSystemRepresentation, link.fileSystemRepresentation) == 0, @"create final symlink fixture");
             check(!wq_write(link, bytes(@"bad"), &error) && has(file, @"NEWer-target"), @"symlink mutation refused");
 
+            NSString *restricted = [base stringByAppendingPathComponent:@"search-only-parent"];
+            check([fm createDirectoryAtPath:restricted withIntermediateDirectories:YES attributes:nil error:nil], @"create search-only parent");
+            NSString *restrictedFile = [restricted stringByAppendingPathComponent:@"file"];
+            put(restrictedFile, @"restricted original");
+            check(chmod(restricted.fileSystemRepresentation, 0111) == 0, @"remove ancestor enumeration permission");
+            @try {
+                check(wq_write(restrictedFile, bytes(@"restricted new"), &error) && has(restrictedFile, @"restricted new"), @"mutation needs search but not ancestor read-directory rights");
+            } @finally { chmod(restricted.fileSystemRepresentation, 0700); }
+            check(chmod(restrictedFile.fileSystemRepresentation, 0400) == 0, @"make disposable file read-only");
+            check(wq_delete(restrictedFile, &error), @"read-only regular file delete still backs up and succeeds");
+
+            for (NSString *stage in @[@"verified", @"backedUp"]) {
+                for (NSNumber *patch in @[@NO, @YES]) {
+                    for (NSNumber *replace in @[@NO, @YES]) {
+                        put(file, @"original");
+                        NSDictionary *snapshot = wq_file_version(file);
+                        wq_test_mutation_hook = ^(NSString *point, NSString *path) {
+                            if (![point isEqual:stage]) return;
+                            if (replace.boolValue) put(path, @"newer");
+                            else {
+                                int fd = open(path.fileSystemRepresentation, O_WRONLY | O_TRUNC);
+                                check(fd >= 0 && WQWriteBytes(fd, bytes(@"newer")), @"inject version-race matrix write");
+                                close(fd);
+                            }
+                        };
+                        BOOL changed = patch.boolValue ? wq_patch_if_unchanged(file, @{ @0: bytes(@"bad") }, snapshot, &error)
+                                                       : wq_write_if_unchanged(file, bytes(@"bad"), snapshot, &error);
+                        check(!changed && has(file, @"newer"), @"write/patch reject inode or version swap at both pre-write barriers");
+                        wq_test_mutation_hook = nil;
+                    }
+                }
+            }
+
             check(WQBackupStampValid(@"20261109-203000-123-11") && WQBackupStampValid(@"20261109-203000"), @"current and historical stamps accepted");
-            for (NSString *stamp in @[@"garbage", @"20261309-203000-123-1", @"20260230-203000-123-1", @"20261109-253000-123-1", @"20261109-203000-123-0", @"20261109-203000-123-01", @"20261109-203000-123-18446744073709551616"]) {
+            for (NSString *stamp in @[@"garbage", @"20261109-203000\n", @"20261309-203000-123-1", @"20260230-203000-123-1", @"20261109-253000-123-1", @"20261109-203000-123-0", @"20261109-203000-123-01", @"20261109-203000-123-18446744073709551616"]) {
                 check(!WQBackupStampValid(stamp), @"malformed stamp rejected");
             }
             check(!wq_backup_original_path([wq_test_backup_root stringByAppendingPathComponent:@"garbage/private/var/file"]), @"arbitrary stamp cannot supply restore path");

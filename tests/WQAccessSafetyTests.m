@@ -36,6 +36,16 @@ int main(void)
             check([fm fileExistsAtPath:[library stringByAppendingPathComponent:@".wq-caches-preserved/nested/sentinel"]], @"conflict retains preserved original");
             check(unlinkat(fd, "Caches", AT_REMOVEDIR) == 0 && WQCacheSwapRecover(fd), @"recover after fixture conflict removed");
             check(WQCacheSwapRecover(fd), @"recovery idempotent");
+            NSString *restricted = [base stringByAppendingPathComponent:@"search-only/child"];
+            check([fm createDirectoryAtPath:restricted withIntermediateDirectories:YES attributes:nil error:nil], @"create traversal fixture");
+            NSString *parent = restricted.stringByDeletingLastPathComponent;
+            check(chmod(parent.fileSystemRepresentation, 0111) == 0, @"set traversal-only ancestor permissions");
+            @try {
+                int child = WQOpenDirectoryNoLinks(restricted);
+                check(child >= 0, @"no-follow walk does not require ancestor enumeration");
+                close(child);
+            } @finally { chmod(parent.fileSystemRepresentation, 0700); }
+            check(!WQAbsolutePathGrammar(@"/private/var/../file") && !WQAbsolutePathGrammar(@"/private//var/file"), @"grammar rejects traversal and ambiguous empty components");
             close(fd);
         } @finally {
             [fm removeItemAtPath:base error:nil];

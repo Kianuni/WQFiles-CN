@@ -408,7 +408,7 @@ static void wq_mutation_close(WQMutation *mutation)
 static BOOL wq_mutation_current(NSString *path, WQMutation *mutation, BOOL version, NSString **errorText)
 {
     struct stat current, entry, parent, currentParent;
-    int checkParent = WQOpenDirectoryNoLinks(path.stringByDeletingLastPathComponent);
+    int checkParent = WQOpenDirectoryNoLinksFlags(path.stringByDeletingLastPathComponent, O_SEARCH);
     BOOL ok = checkParent >= 0 && fstat(checkParent, &currentParent) == 0 &&
         fstat(mutation->parent, &parent) == 0 && WQSameObject(&parent, &currentParent) &&
         fstat(mutation->fd, &current) == 0 && S_ISREG(current.st_mode) &&
@@ -424,8 +424,8 @@ static BOOL wq_mutation_open(NSString *path, NSDictionary *expected, WQMutation 
     *mutation = (WQMutation){ .fd = -1, .parent = -1 };
     if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path))) { if (errorText) *errorText = @"Invalid file path"; return NO; }
     NSString *parent = path.stringByDeletingLastPathComponent;
-    mutation->parent = WQOpenDirectoryNoLinks(parent);
-    if (mutation->parent < 0 && wq_is_denied(errno) && wq_grant(parent)) mutation->parent = WQOpenDirectoryNoLinks(parent);
+    mutation->parent = WQOpenDirectoryNoLinksFlags(parent, O_SEARCH);
+    if (mutation->parent < 0 && wq_is_denied(errno) && wq_grant(parent)) mutation->parent = WQOpenDirectoryNoLinksFlags(parent, O_SEARCH);
     if (mutation->parent >= 0) {
         mutation->fd = WQOpenRegularAt(mutation->parent, path.lastPathComponent.fileSystemRepresentation, flags, 0);
         if (mutation->fd < 0 && wq_is_denied(errno) && wq_grant(path))
@@ -812,11 +812,16 @@ BOOL wq_delete(NSString *path, NSString **errorText)
     return rc == 0;
 }
 
+static int wq_open_directory_flags(NSString *path, int flags)
+{
+    int fd = WQOpenDirectoryNoLinksFlags(path, flags);
+    if (fd < 0 && wq_is_denied(errno) && wq_grant(path)) fd = WQOpenDirectoryNoLinksFlags(path, flags);
+    return fd;
+}
+
 static int wq_open_directory(NSString *path)
 {
-    int fd = WQOpenDirectoryNoLinks(path);
-    if (fd < 0 && wq_is_denied(errno) && wq_grant(path)) fd = WQOpenDirectoryNoLinks(path);
-    return fd;
+    return wq_open_directory_flags(path, O_RDONLY);
 }
 
 BOOL wq_rename(NSString *path, NSString *newName, NSString **errorText)
@@ -827,7 +832,7 @@ BOOL wq_rename(NSString *path, NSString *newName, NSString **errorText)
         return NO;
     }
     NSString *parentPath = path.stringByDeletingLastPathComponent;
-    int parent = wq_open_directory(parentPath);
+    int parent = wq_open_directory_flags(parentPath, O_SEARCH);
     if (parent < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
     WQ_TREE_HOOK(@"renameReady", [parentPath stringByAppendingPathComponent:newName]);
     int rc = renameatx_np(parent, path.lastPathComponent.fileSystemRepresentation, parent, newName.fileSystemRepresentation, RENAME_EXCL);
@@ -957,7 +962,7 @@ unsigned long long wq_dir_size(NSString *dir)
 
 static BOOL wq_directory_current(NSString *path, int fd)
 {
-    int current = WQOpenDirectoryNoLinks(path);
+    int current = WQOpenDirectoryNoLinksFlags(path, O_SEARCH);
     struct stat a, b;
     BOOL ok = current >= 0 && fstat(current, &a) == 0 && fstat(fd, &b) == 0 && WQSameObject(&a, &b);
     if (current >= 0) close(current);

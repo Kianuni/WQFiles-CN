@@ -23,22 +23,45 @@ static inline NSString *WQCanonicalVarPath(NSString *path)
     return path;
 }
 
-static inline int WQOpenDirectoryNoLinks(NSString *path)
+static inline int WQOpenDirectoryNoLinksFlags(NSString *path, int flags)
 {
     path = WQCanonicalVarPath(path);
     if (![path hasPrefix:@"/"] || [path rangeOfString:@"\0"].location != NSNotFound) { errno = EINVAL; return -1; }
-    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    // Ancestors need traversal, not enumeration. A file/folder-specific sandbox
+    // extension need not grant read-directory rights on all container parents.
+    int fd = open("/", O_SEARCH | O_CLOEXEC);
     if (fd < 0) return -1;
     for (NSString *part in [path componentsSeparatedByString:@"/"]) {
         if (!part.length) continue;
         if ([part isEqualToString:@"."] || [part isEqualToString:@".."]) { close(fd); errno = EINVAL; return -1; }
-        int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        int next = openat(fd, part.fileSystemRepresentation, O_SEARCH | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         int err = errno;
         close(fd);
         if (next < 0) { errno = err; return -1; }
         fd = next;
     }
-    return fd;
+    if (flags == O_SEARCH) return fd;
+    int result = openat(fd, ".", flags | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int err = errno;
+    close(fd);
+    if (result < 0) errno = err;
+    return result;
+}
+
+static inline int WQOpenDirectoryNoLinks(NSString *path)
+{
+    return WQOpenDirectoryNoLinksFlags(path, O_RDONLY);
+}
+
+static inline BOOL WQSyncDirectory(int fd)
+{
+    int readable = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (readable < 0) return NO;
+    BOOL ok = fsync(readable) == 0;
+    int err = errno;
+    if (close(readable) != 0 && ok) { ok = NO; err = errno; }
+    if (!ok) errno = err;
+    return ok;
 }
 
 static inline int WQOpenRegularAt(int parent, const char *name, int flags, mode_t mode)
@@ -166,22 +189,26 @@ static inline int WQCreateDirectoriesNoLinksMode(NSString *path, mode_t mode)
 {
     path = WQCanonicalVarPath(path);
     if (!WQAbsolutePathGrammar(path)) { errno = EINVAL; return -1; }
-    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int fd = open("/", O_SEARCH | O_CLOEXEC);
     if (fd < 0) return -1;
     for (NSString *part in [path componentsSeparatedByString:@"/"]) {
         if (!part.length) continue;
-        int next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        int next = openat(fd, part.fileSystemRepresentation, O_SEARCH | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (next < 0 && errno == ENOENT) {
             if (mkdirat(fd, part.fileSystemRepresentation, mode) != 0 && errno != EEXIST) { int err = errno; close(fd); errno = err; return -1; }
-            if (fsync(fd) != 0) { int err = errno; close(fd); errno = err; return -1; }
-            next = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+            if (!WQSyncDirectory(fd)) { int err = errno; close(fd); errno = err; return -1; }
+            next = openat(fd, part.fileSystemRepresentation, O_SEARCH | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         }
         int err = errno;
         close(fd);
         if (next < 0) { errno = err; return -1; }
         fd = next;
     }
-    return fd;
+    int result = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int err = errno;
+    close(fd);
+    if (result < 0) errno = err;
+    return result;
 }
 
 static inline int WQCreateDirectoriesNoLinks(NSString *path)
