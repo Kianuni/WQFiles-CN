@@ -995,8 +995,11 @@ extern ssize_t fsgetpath(char *buf, size_t buflen, fsid_t *fsid, uint64_t objid)
 // increasing order, so a file created now gets one of the newest. Containers
 // of apps installed long after setup sit far above the ids of Apple's own
 // apps; a fixed limit misses them on a well-used device.
-static int64_t wq_volume_max_inode(fsid_t fsid)
+static const int64_t kWQInodeMargin = 100000;
+
+static int64_t wq_volume_max_inode(fsid_t fsid, int64_t *probeInode)
 {
+    if (probeInode) *probeInode = 0;
 #ifdef WQ_ACCESS_TESTING
     if (wq_test_volume_limit >= 0) return wq_test_volume_limit;
 #endif
@@ -1021,8 +1024,9 @@ static int64_t wq_volume_max_inode(fsid_t fsid)
         wq_log(@"inode probe: %@ is on a different volume", probe);
         return 0;
     }
-    if ((uint64_t)st.st_ino > (uint64_t)INT64_MAX - 100000) return 0;
-    return (int64_t)st.st_ino + 100000;
+    if ((uint64_t)st.st_ino > (uint64_t)INT64_MAX - (uint64_t)kWQInodeMargin) return 0;
+    if (probeInode) *probeInode = (int64_t)st.st_ino;
+    return (int64_t)st.st_ino + kWQInodeMargin;
 }
 
 NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancellation *cancellation,
@@ -1031,14 +1035,22 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
     if (cancellation.isCancelled) return nil;
     NSString *base = wq_norm(dir);  // /private/var/... form
     struct statfs sfs;
-    if (statfs(base.fileSystemRepresentation, &sfs) != 0 &&
-        statfs("/private/var/mobile", &sfs) != 0) {
-        wq_log(@"enumerate %@: statfs failed (%@)", dir, wq_errno(errno));
-        return nil;
+    if (statfs(base.fileSystemRepresentation, &sfs) != 0) {
+        struct stat baseStat;
+        if (lstat(base.fileSystemRepresentation, &baseStat) != 0 || !S_ISDIR(baseStat.st_mode)) {
+            wq_log(@"enumerate %@: base is missing or inaccessible (%@)", dir, wq_errno(errno));
+            return nil;
+        }
+        if (statfs("/private/var/mobile", &sfs) != 0) {
+            wq_log(@"enumerate %@: statfs failed (%@)", dir, wq_errno(errno));
+            return nil;
+        }
     }
     fsid_t fsid = sfs.f_fsid;
-    if (maxInode <= 0) {
-        maxInode = wq_volume_max_inode(fsid);
+    BOOL dynamicBound = maxInode <= 0;
+    int64_t probeInode = 0;
+    if (dynamicBound) {
+        maxInode = wq_volume_max_inode(fsid, &probeInode);
         if (maxInode <= 0) {
             wq_log(@"enumerate %@: dynamic inode limit unavailable; refusing to present a fixed-range partial scan as complete", dir);
             return nil;
@@ -1081,6 +1093,17 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
     });
     if (cancellation.isCancelled) {
         return nil;
+    }
+    if (dynamicBound && probeInode > 0) {
+        int64_t afterProbe = 0;
+        if (wq_volume_max_inode(fsid, &afterProbe) <= 0 || afterProbe <= 0) {
+            wq_log(@"enumerate %@: completion probe unavailable; refusing to present a possibly partial scan", dir);
+            return nil;
+        }
+        if (afterProbe > probeInode + kWQInodeMargin) {
+            wq_log(@"enumerate %@: inode IDs advanced beyond the scanned bound; refusing to present a partial scan", dir);
+            return nil;
+        }
     }
     [found sortUsingSelector:@selector(compare:)];
     return found;

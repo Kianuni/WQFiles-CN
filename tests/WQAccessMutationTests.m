@@ -183,6 +183,7 @@ int main(void)
                 check(!ok && savedVersion == nil && has(file, @"external"), @"post-write interference is not adopted or rolled back over");
                 wq_test_mutation_hook = nil;
             }
+            check(wq_enumerate([base stringByAppendingPathComponent:@"absent"], 1, nil, nil) == nil, @"missing enumeration base is failure, not empty success");
             wq_test_volume_limit = 0;
             check(wq_enumerate(base, 0, nil, nil) == nil, @"unavailable inode probe is failure, not silent fixed-range success");
             check(wq_enumerate(base, 1, nil, nil) != nil, @"explicit small bound still supports successful empty enumeration");

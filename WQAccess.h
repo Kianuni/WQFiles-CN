@@ -98,7 +98,8 @@ BOOL wq_stat(NSString *path, struct stat *st);
 // token on dir. maxInode bounds the scan (0 = up to the newest id on the
 // volume); progress is called off the main thread, from several threads.
 // Returns absolute child paths, sorted, or nil on failure/cancellation, including
-// when the dynamic bound cannot be discovered. No implicit fixed-range fallback.
+// when the dynamic bound cannot be discovered or a completion probe shows that
+// inode IDs advanced beyond the scanned range. No implicit fixed-range fallback.
 NSArray<NSString *> *_Nullable wq_enumerate(NSString *dir, int64_t maxInode,
                                             WQScanCancellation *_Nullable cancellation,
                                             void (^_Nullable progress)(int64_t done, int64_t total, NSUInteger found));
