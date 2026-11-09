@@ -478,12 +478,26 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 
 #pragma mark - Folder
 
+static NSString *wq_folder_date_text(NSDate *date)
+{
+    static NSDateFormatter *formatter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        formatter = [NSDateFormatter new];
+        formatter.dateStyle = NSDateFormatterShortStyle;
+        formatter.timeStyle = NSDateFormatterShortStyle;
+        formatter.locale = NSLocale.autoupdatingCurrentLocale;
+    });
+    return date ? [formatter stringFromDate:date] : @"";
+}
+
 @implementation WQDirViewController {
     NSString *_path;
     NSArray<WQItem *> *_all;     // everything in the folder
     NSArray<WQItem *> *_items;   // what the search lets through (shown)
     NSString *_query;
     UILabel *_pathLabel;
+    UIView *_headerBox;
     NSString *_scanStatus;
     CGFloat _headerWidth;
     NSString *_error;
@@ -579,17 +593,22 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
         _pathLabel.userInteractionEnabled = YES;
         [_pathLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(copyPath)]];
     }
+    if (!_headerBox) {
+        _headerBox = wq_device_header(width);
+        [_headerBox addSubview:_pathLabel];
+        self.tableView.tableHeaderView = _headerBox;
+    }
     // Zero-width spaces after each slash let lines break between components.
     NSString *breakable = [_path stringByReplacingOccurrencesOfString:@"/" withString:@"/\u200B"];
     _pathLabel.text = _scanStatus ? [NSString stringWithFormat:@"%@\n%@", breakable, _scanStatus] : breakable;
     CGFloat side = 16, top = 42;
     CGSize fit = [_pathLabel sizeThatFits:CGSizeMake(width - 2 * side, CGFLOAT_MAX)];
-    UIView *box = wq_device_header(width);
-    box.frame = CGRectMake(0, 0, width, top + ceil(fit.height) + 10);
+    CGFloat height = top + ceil(fit.height) + 10;
+    CGFloat oldHeight = _headerBox.frame.size.height;
+    _headerBox.frame = CGRectMake(0, 0, width, height);
     _pathLabel.frame = CGRectMake(side, top, width - 2 * side, ceil(fit.height));
-    [box addSubview:_pathLabel];
     _headerWidth = width;
-    self.tableView.tableHeaderView = box;
+    if (fabs(height - oldHeight) > 0.5) self.tableView.tableHeaderView = _headerBox;
 }
 
 - (void)viewDidLayoutSubviews
@@ -796,9 +815,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     }
     WQItem *item = _items[(NSUInteger)indexPath.row];
     c.text = item.label ?: item.name;
-    NSString *date = item.modified ? [NSDateFormatter localizedStringFromDate:item.modified
-                                                                   dateStyle:NSDateFormatterShortStyle
-                                                                   timeStyle:NSDateFormatterShortStyle] : @"";
+    NSString *date = wq_folder_date_text(item.modified);
     NSString *detail = item.isDir ? date : [NSString stringWithFormat:@"%@ · %@", wq_size_text(item.size), date];
     if (item.label) detail = [NSString stringWithFormat:@"%@\n%@", item.name, detail];
     if (item.isLink) detail = [@"symlink · " stringByAppendingString:detail];
