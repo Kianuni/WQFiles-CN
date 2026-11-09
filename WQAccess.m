@@ -21,6 +21,7 @@
 #import <fcntl.h>
 #import <string.h>
 #import <stdatomic.h>
+#import <sys/clonefile.h>
 #import <sys/stat.h>
 #import <sys/mount.h>
 #import <sys/xattr.h>
@@ -368,13 +369,51 @@ static BOOL wq_backup_fd(NSString *path, int fd, NSString **backupPath)
     NSString *dest = [[root stringByAppendingPathComponent:stamp] stringByAppendingString:original];
     int parent = WQCreateDirectoriesNoLinks(dest.stringByDeletingLastPathComponent);
     if (parent < 0) return NO;
-    int out = WQOpenRegularAt(parent, dest.lastPathComponent.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (out < 0) { close(parent); return NO; }
+    const char *name = dest.lastPathComponent.fileSystemRepresentation;
     NSString *error = nil;
-    BOOL ok = lseek(fd, 0, SEEK_SET) >= 0 && wq_stream(fd, out, &error);
-    if (close(out) != 0) ok = NO;
-    if (ok && fsync(parent) != 0) ok = NO;
-    if (!ok) unlinkat(parent, dest.lastPathComponent.fileSystemRepresentation, 0);
+    BOOL ok = NO;
+    // APFS clone first: a copy-on-write snapshot is independent, durable, and
+    // does not require a full-size duplicate for every edited file.
+    if (fclonefileat(fd, parent, name, 0) == 0) {
+        int cloned = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat clonedStat = {0}, sourceStat = {0};
+        if (cloned >= 0 && fstat(cloned, &clonedStat) == 0 && fstat(fd, &sourceStat) == 0 &&
+            clonedStat.st_size == sourceStat.st_size && fsync(cloned) == 0) {
+            ok = YES;
+        } else {
+            error = wq_errno(errno);
+        }
+        if (cloned >= 0) close(cloned);
+        if (!ok) {
+            unlinkat(parent, name, 0);
+            wq_log(@"backup: clone verification failed for %@ (%@)", path, error ?: @"unknown error");
+        }
+    } else {
+        int cloneError = errno;
+        wq_log(@"backup: clone unavailable for %@ (%@); streaming", path, wq_errno(cloneError));
+        struct stat sourceStat = {0};
+        struct statfs space = {0};
+        if (fstat(fd, &sourceStat) == 0 && fstatfs(parent, &space) == 0) {
+            unsigned long long available = (unsigned long long)space.f_bavail * (unsigned long long)space.f_bsize;
+            if ((unsigned long long)sourceStat.st_size > available) {
+                error = @"Not enough free space for a full backup copy";
+                wq_log(@"backup: %@ (%@)", path, error);
+                close(parent);
+                return NO;
+            }
+        }
+        int out = WQOpenRegularAt(parent, name, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (out >= 0) {
+            ok = lseek(fd, 0, SEEK_SET) >= 0 && wq_stream(fd, out, &error);
+            if (close(out) != 0) ok = NO;
+        } else {
+            error = wq_errno(errno);
+        }
+        if (ok && fsync(parent) != 0) ok = NO;
+        if (!ok) unlinkat(parent, name, 0);
+    }
+    if (ok && fsync(parent) != 0) { ok = NO; error = wq_errno(errno); }
+    if (!ok) unlinkat(parent, name, 0);
     close(parent);
     wq_log(@"backup: %@ -> %@", path, ok ? dest : error ?: @"FAILED");
     if (ok && backupPath) *backupPath = dest;
