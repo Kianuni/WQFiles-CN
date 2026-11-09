@@ -32,6 +32,7 @@
 
 @implementation WQAppsViewController {
     NSArray<WQAppItem *> *_apps;
+    NSArray<WQAppItem *> *_visibleApps;
     NSString *_query;
     NSString *_status;
     BOOL _busy;
@@ -497,6 +498,7 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
             if (generation != self->_scanGeneration || cancellation.isCancelled) return;
             self->_scanning = NO;
             self->_apps = apps;
+            [self rebuildVisibleApps];
             [self.refreshControl endRefreshing];
             [self setBusy:NO status:note];
         });
@@ -505,8 +507,16 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
 
 - (NSArray<WQAppItem *> *)visibleApps
 {
-    if (!_query.length) return _apps;
-    return [_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
+    return _visibleApps ?: @[];
+}
+
+- (void)rebuildVisibleApps
+{
+    if (!_query.length) {
+        _visibleApps = _apps;
+        return;
+    }
+    _visibleApps = [_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
         return [a.name localizedCaseInsensitiveContainsString:self->_query] ||
                [a.bundleID localizedCaseInsensitiveContainsString:self->_query];
     }]];
@@ -515,6 +525,7 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController
 {
     _query = [searchController.searchBar.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    [self rebuildVisibleApps];
     [self.tableView reloadData];
 }
 

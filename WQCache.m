@@ -366,6 +366,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 
 @implementation WQCacheCleanerViewController {
     NSArray<WQCacheItem *> *_items;
+    NSArray<WQCacheItem *> *_visibleItems;
     NSString *_query;
     NSString *_status;   // scan / clean progress, nil when idle
     NSString *_result;   // last clean result
@@ -416,8 +417,16 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 
 - (NSArray<WQCacheItem *> *)visibleItems
 {
-    if (!_query.length) return _items;
-    return [_items filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQCacheItem *it, NSDictionary *__unused b) {
+    return _visibleItems ?: @[];
+}
+
+- (void)rebuildVisibleItems
+{
+    if (!_query.length) {
+        _visibleItems = _items;
+        return;
+    }
+    _visibleItems = [_items filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQCacheItem *it, NSDictionary *__unused b) {
         return [it.name localizedCaseInsensitiveContainsString:self->_query] ||
                (it.bundleID && [it.bundleID localizedCaseInsensitiveContainsString:self->_query]);
     }]];
@@ -426,6 +435,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController
 {
     _query = [searchController.searchBar.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    [self rebuildVisibleItems];
     [self.tableView reloadData];
     [self updateButtons];
 }
@@ -624,6 +634,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != self->_scanGeneration || cancellation.isCancelled) return;
             self->_items = items;
+            [self rebuildVisibleItems];
             self->_scanning = NO;
             self->_scanLimited = scanLimited;
             self->_status = note;
