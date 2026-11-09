@@ -3,8 +3,8 @@
 //  WQ Files
 //
 //  Property list editor: browse dictionaries and arrays, edit values by type,
-//  add, delete, rename and reorder. Saves in the file's original format
-//  through wq_write (backup first).
+//  add, delete, rename and reorder. Saves in the file's original format through
+//  wq_write_if_unchanged_get_version (backup first, verified contents).
 //
 
 #import <UIKit/UIKit.h>

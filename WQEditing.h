@@ -9,8 +9,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// Editors implement this so every navigation route (Back, Home and the
-// interactive edge swipe) protects unsaved changes in the same way.
+// Editors implement this so Back, Home and the interactive edge swipe protect
+// unsaved changes. Root plist editors prompt for a dirty document; child
+// plist editors intentionally keep the shared document's edits.
 @protocol WQUnsavedEditing <NSObject>
 - (BOOL)wq_needsLeaveConfirmation;
 - (void)confirmLeaveThen:(void (^)(void))proceed;

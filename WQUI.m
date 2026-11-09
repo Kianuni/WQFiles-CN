@@ -1,6 +1,7 @@
 //
 //  WQUI.m
 //  WQ Files shared UI helpers
+//  GPL-3.0-or-later.
 //
 
 #import "WQUI.h"

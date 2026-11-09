@@ -1,6 +1,7 @@
 //
 //  WQCache.m
 //  WQ Files cache cleaner
+//  GPL-3.0-or-later.
 //
 
 #import "WQCache.h"

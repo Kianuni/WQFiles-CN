@@ -1,6 +1,7 @@
 //
 //  WQLaunchServices.m
 //  WQ Files
+//  GPL-3.0-or-later.
 //
 
 #import "WQLaunchServices.h"

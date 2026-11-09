@@ -1,6 +1,7 @@
 //
 //  WQSharing.m
 //  WQ Files temporary exports and share sheets
+//  GPL-3.0-or-later.
 //
 
 #import "WQSharing.h"

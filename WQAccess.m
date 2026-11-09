@@ -1344,13 +1344,6 @@ WQMeasureResult wq_measure_tree(NSString *dir, WQScanCancellation *cancellation,
     return limited ? WQMeasureResultLimited : WQMeasureResultKnown;
 }
 
-unsigned long long wq_dir_size(NSString *dir)
-{
-    unsigned long long bytes = 0;
-    WQMeasureResult result = wq_measure_tree(dir, nil, &bytes);
-    return result == WQMeasureResultMissing ? 0 : bytes;
-}
-
 static BOOL wq_directory_current(NSString *path, int fd)
 {
     int current = WQOpenDirectoryNoLinksFlags(path, O_SEARCH);

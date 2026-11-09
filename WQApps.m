@@ -1,6 +1,7 @@
 //
 //  WQApps.m
 //  WQ Files app backup and restore manager
+//  GPL-3.0-or-later.
 //
 
 #import "WQApps.h"
