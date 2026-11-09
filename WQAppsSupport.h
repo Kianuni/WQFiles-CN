@@ -175,3 +175,36 @@ static inline NSComparisonResult WQAppsSupportCompareBackupMetadata(NSDate *date
     if (sequenceA > sequenceB) return NSOrderedDescending;
     return [nameA compare:nameB options:NSNumericSearch];
 }
+
+typedef NS_ENUM(NSInteger, WQAppsSupportJournalState) {
+    WQAppsSupportJournalMissing,
+    WQAppsSupportJournalActive,
+    WQAppsSupportJournalCommitted,
+    WQAppsSupportJournalUnknown,
+};
+
+static inline WQAppsSupportJournalState WQAppsSupportJournalStateForDictionary(NSDictionary *journal)
+{
+    if (![journal isKindOfClass:NSDictionary.class]) return WQAppsSupportJournalMissing;
+    id state = journal[@"State"];
+    if (![state isKindOfClass:NSString.class]) return WQAppsSupportJournalUnknown;
+    if ([state isEqualToString:@"Active"]) return WQAppsSupportJournalActive;
+    if ([state isEqualToString:@"Committed"]) return WQAppsSupportJournalCommitted;
+    return WQAppsSupportJournalUnknown;
+}
+
+// A new restore may start only when no recovery is pending. A committed
+// journal is safe to clean up and replace; an Active or unknown journal must
+// be recovered or explicitly discarded first.
+static inline BOOL WQAppsSupportJournalAllowsNewRestore(WQAppsSupportJournalState state, NSString **error)
+{
+    if (state == WQAppsSupportJournalActive) {
+        if (error) *error = @"An interrupted restore is still active. Recover or discard it before starting another restore";
+        return NO;
+    }
+    if (state == WQAppsSupportJournalUnknown) {
+        if (error) *error = @"The existing restore recovery journal has an unknown state";
+        return NO;
+    }
+    return YES;
+}

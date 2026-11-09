@@ -87,6 +87,21 @@ static void TestNumericOrdering(void)
                                                 sameTime, 99, @"older") == NSOrderedDescending);
 }
 
+static void TestJournalStates(void)
+{
+    WQCheck(WQAppsSupportJournalStateForDictionary(@{ @"State": @"Active" }) == WQAppsSupportJournalActive);
+    WQCheck(WQAppsSupportJournalStateForDictionary(@{ @"State": @"Committed" }) == WQAppsSupportJournalCommitted);
+    WQCheck(WQAppsSupportJournalStateForDictionary(@{ @"State": @"Other" }) == WQAppsSupportJournalUnknown);
+    WQCheck(WQAppsSupportJournalStateForDictionary(@{}) == WQAppsSupportJournalUnknown);
+    WQCheck(WQAppsSupportJournalStateForDictionary(nil) == WQAppsSupportJournalMissing);
+    NSString *error = nil;
+    WQCheck(!WQAppsSupportJournalAllowsNewRestore(WQAppsSupportJournalActive, &error) && error.length > 0);
+    error = nil;
+    WQCheck(!WQAppsSupportJournalAllowsNewRestore(WQAppsSupportJournalUnknown, &error) && error.length > 0);
+    WQCheck(WQAppsSupportJournalAllowsNewRestore(WQAppsSupportJournalMissing, NULL));
+    WQCheck(WQAppsSupportJournalAllowsNewRestore(WQAppsSupportJournalCommitted, NULL));
+}
+
 static void TestTreeSignatures(void)
 {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -131,6 +146,7 @@ int main(void)
     @autoreleasepool {
         TestManifestTypes();
         TestNumericOrdering();
+        TestJournalStates();
         TestTreeSignatures();
         if (failures) {
             fprintf(stderr, "%d Apps regression check(s) failed\n", failures);

@@ -802,6 +802,26 @@ static BOOL wq_begin_restore_journal(WQAppItem *app, NSString *backup, NSString 
         if (error) *error = @"The restore paths are not inside this app's backup folder";
         return NO;
     }
+    BOOL exists = NO;
+    NSMutableDictionary *existing = nil;
+    NSString *readError = nil;
+    if (!wq_read_restore_journal(&existing, &exists, &readError)) {
+        if (error) *error = readError;
+        return NO;
+    }
+    if (exists) {
+        WQAppsSupportJournalState state = WQAppsSupportJournalStateForDictionary(existing);
+        NSString *policyError = nil;
+        if (!WQAppsSupportJournalAllowsNewRestore(state, &policyError)) {
+            if (error) *error = policyError;
+            return NO;
+        }
+        if (state == WQAppsSupportJournalCommitted &&
+            !wq_remove_restore_journal(&readError)) {
+            if (error) *error = readError ?: @"Cannot remove the completed restore journal";
+            return NO;
+        }
+    }
     NSDictionary *journal = @{ @"Format": @2, @"State": @"Active", @"BundleID": app.bundleID,
                                @"Container": app.container, @"Backup": backup, @"Safety": safety,
                                @"ContainerDevice": @(app.containerDevice), @"ContainerInode": @(app.containerInode),
