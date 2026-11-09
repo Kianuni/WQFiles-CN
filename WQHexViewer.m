@@ -46,6 +46,7 @@ static NSData *wqh_parse_hex(NSString *text)
     NSMutableDictionary<NSNumber *, NSNumber *> *_edits;   // offset -> new byte
     NSUInteger _revision;
     BOOL _saving;
+    NSDictionary<NSString *, NSNumber *> *_version;
     unsigned long long _matchOffset;
     NSUInteger _matchLength;
     NSString *_status;
@@ -81,7 +82,9 @@ static NSData *wqh_parse_hex(NSString *text)
     dispatch_async(_queue, ^{
         struct stat st;
         BOOL ok = wq_stat(path, &st) && S_ISREG(st.st_mode);
+        NSDictionary *version = ok ? wq_file_version(path) : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
+            self->_version = version;
             self->_size = ok ? (unsigned long long)st.st_size : 0;
             [self layoutColumns];
             if (wq_permission_hint(path, YES)) self->_readOnly = YES;
@@ -335,14 +338,16 @@ static NSData *wqh_parse_hex(NSString *text)
         NSString *path = self->_path;
         dispatch_async(self->_queue, ^{
             NSString *error = nil;
-            BOOL ok = wq_patch(path, runs, &error);
+            BOOL ok = wq_patch_if_unchanged(path, runs, self->_version, &error);
+            NSDictionary *newVersion = ok ? wq_file_version(path) : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_saving = NO;
                 if (!ok) {
                     [self updateBar];
-                    wqh_alert(self, @"Save failed", wq_permission_hint(path, YES) ?: error ?: @"Unknown error");
+                    wqh_alert(self, @"Save failed", error ?: wq_permission_hint(path, YES) ?: @"Unknown error");
                     return;
                 }
+                self->_version = newVersion;
                 if (self->_revision == savedRevision) [self->_edits removeAllObjects];
                 [self->_pages removeAllObjects];
                 [self updateBar];

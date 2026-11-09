@@ -371,6 +371,24 @@ NSString *wq_backup_original_path(NSString *backupPath)
 
 #pragma mark - File operations
 
+NSDictionary<NSString *, NSNumber *> *wq_file_version(NSString *path)
+{
+    struct stat st;
+    if (!wq_stat(path, &st) || !S_ISREG(st.st_mode)) return nil;
+    return @{ @"device": @(st.st_dev), @"inode": @(st.st_ino), @"size": @(st.st_size),
+              @"modifiedSeconds": @(st.st_mtimespec.tv_sec), @"modifiedNanoseconds": @(st.st_mtimespec.tv_nsec),
+              @"changedSeconds": @(st.st_ctimespec.tv_sec), @"changedNanoseconds": @(st.st_ctimespec.tv_nsec) };
+}
+
+static BOOL wq_version_is_current(NSString *path, NSDictionary *expected, NSString **errorText)
+{
+    if (!expected) return YES;
+    NSDictionary *current = wq_file_version(path);
+    if ([current isEqualToDictionary:expected]) return YES;
+    if (errorText) *errorText = @"The file changed after it was opened. Your edits were not written; reopen it and compare the changes.";
+    return NO;
+}
+
 NSArray<NSString *> *wq_list(NSString *dir, NSString **errorText)
 {
     NSError *error = nil;
@@ -456,8 +474,9 @@ static BOOL wq_finish_fd(int fd, BOOL ok, int *err)
     return ok;
 }
 
-BOOL wq_write(NSString *path, NSData *data, NSString **errorText)
+BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary<NSString *, NSNumber *> *expected, NSString **errorText)
 {
+    if (!wq_version_is_current(path, expected, errorText)) return NO;
     NSString *backup = nil;
     if (!wq_backup(path, &backup)) {
         if (errorText) *errorText = @"Backup of the current file failed, nothing was written";
@@ -476,6 +495,11 @@ BOOL wq_write(NSString *path, NSData *data, NSString **errorText)
     if (!ok) wq_report_write_failure(path, backup, wq_errno(err), errorText);
     else wq_discard_temporary_backup(path, backup);
     return ok;
+}
+
+BOOL wq_write(NSString *path, NSData *data, NSString **errorText)
+{
+    return wq_write_if_unchanged(path, data, nil, errorText);
 }
 
 BOOL wq_write_from_file(NSString *path, NSString *source, NSString **errorText)
@@ -560,8 +584,10 @@ NSData *wq_read_range(NSString *path, unsigned long long offset, NSUInteger leng
     return data;
 }
 
-BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString **errorText)
+BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
+                           NSDictionary<NSString *, NSNumber *> *expected, NSString **errorText)
 {
+    if (!wq_version_is_current(path, expected, errorText)) return NO;
     struct stat before;
     if (!wq_stat(path, &before) || !S_ISREG(before.st_mode)) {
         if (errorText) *errorText = @"Not a regular file";
@@ -606,6 +632,11 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
     if (!ok) wq_report_write_failure(path, backup, wq_errno(err), errorText);
     else wq_discard_temporary_backup(path, backup);
     return ok;
+}
+
+BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString **errorText)
+{
+    return wq_patch_if_unchanged(path, runs, nil, errorText);
 }
 
 BOOL wq_create_file(NSString *path, NSData *data, NSString **errorText)

@@ -128,6 +128,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 @property (nonatomic) BOOL readOnly;
 @property (nonatomic) BOOL saving;
 @property (nonatomic) NSUInteger revision;
+@property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *version;
 @end
 
 @implementation WQPlistDocument
@@ -191,13 +192,20 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     NSString *path = self.doc.path;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
+        NSDictionary *before = wq_file_version(path);
         NSData *data = wq_read(path, 64 * 1024 * 1024, &error);
+        NSDictionary *version = wq_file_version(path);
+        if (data && (!before || ![before isEqualToDictionary:version])) {
+            data = nil;
+            error = @"The file changed while it was being read. Open it again.";
+        }
         NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
         NSError *parseError = nil;
         id root = data ? [NSPropertyListSerialization propertyListWithData:data
                                                                   options:NSPropertyListMutableContainersAndLeaves
                                                                    format:&format error:&parseError] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
+            self.doc.version = version;
             if (!root) {
                 self.status = data ? [NSString stringWithFormat:@"Not a property list: %@", parseError.localizedDescription]
                                    : (wq_permission_hint(path, NO) ?: [NSString stringWithFormat:@"Cannot read this file: %@", error]);
@@ -349,10 +357,13 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
         [self refresh];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSString *writeError = nil;
-            BOOL ok = wq_write(doc.path, data, &writeError);
+            BOOL ok = wq_write_if_unchanged(doc.path, data, doc.version, &writeError);
             dispatch_async(dispatch_get_main_queue(), ^{
                 doc.saving = NO;
-                if (ok && doc.revision == savedRevision) doc.dirty = NO;
+                if (ok) {
+                    doc.version = wq_file_version(doc.path);
+                    if (doc.revision == savedRevision) doc.dirty = NO;
+                }
                 [self refresh];
                 if (!ok) wqp_alert(self, @"Save failed", wq_permission_hint(doc.path, YES) ?: writeError ?: @"Unknown error");
             });

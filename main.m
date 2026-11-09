@@ -358,6 +358,7 @@ typedef NS_ENUM(NSInteger, WQViewKind) { WQViewText, WQViewPlist, WQViewImage, W
     BOOL _dirty;
     BOOL _saving;
     NSUInteger _revision;
+    NSDictionary<NSString *, NSNumber *> *_version;
 }
 
 static const NSUInteger kViewLimit = 4 * 1024 * 1024;
@@ -424,8 +425,15 @@ static const NSUInteger kHexLimit = 64 * 1024;
         NSString *error = nil;
         struct stat st;
         BOOL exists = wq_stat(path, &st);
+        NSDictionary *before = wq_file_version(path);
         NSData *data = wq_read(path, kViewLimit + 1, &error);
+        NSDictionary *version = wq_file_version(path);
+        if (data && (!before || ![before isEqualToDictionary:version])) {
+            data = nil;
+            error = @"The file changed while it was being read. Open it again.";
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
+            self->_version = version;
             if (!data) {
                 NSString *hint = wq_permission_hint(path, NO);
                 self->_textView.text = [NSString stringWithFormat:@"Cannot read this file.\n\n%@", hint ?: error];
@@ -612,13 +620,17 @@ static const NSUInteger kHexLimit = 64 * 1024;
         NSString *path = self->_path;
         dispatch_async(wq_io(), ^{
             NSString *error = nil;
-            BOOL ok = wq_write(path, newData, &error);
+            BOOL ok = wq_write_if_unchanged(path, newData, self->_version, &error);
+            NSDictionary *newVersion = ok ? wq_file_version(path) : nil;
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_saving = NO;
-                if (ok && self->_revision == savedRevision) self->_dirty = NO;
+                if (ok) {
+                    self->_version = newVersion;
+                    if (self->_revision == savedRevision) self->_dirty = NO;
+                }
                 self->_textView.editable = self->_dirty;
                 [self updateEditButton];
-                if (!ok) wq_alert(self, @"Save failed", wq_permission_hint(path, YES) ?: error ?: @"Unknown error");
+                if (!ok) wq_alert(self, @"Save failed", error ?: wq_permission_hint(path, YES) ?: @"Unknown error");
             });
         });
     }]];

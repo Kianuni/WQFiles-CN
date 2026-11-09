@@ -29,9 +29,15 @@ NSArray<NSString *> *_Nullable wq_list(NSString *dir, NSString *_Nullable *_Null
 // Reads a whole file (up to maxBytes; 0 = no limit).
 NSData *_Nullable wq_read(NSString *path, NSUInteger maxBytes, NSString *_Nullable *_Nullable errorText);
 
+// A file's identity, size and change timestamps, for optimistic concurrency.
+NSDictionary<NSString *, NSNumber *> *_Nullable wq_file_version(NSString *path);
+
 // Overwrites a file in place (same inode, owner and xattrs). The previous
-// contents are backed up first when the file is outside our own container.
+// contents are backed up first, and a failed write attempts to roll back.
+// The _if_unchanged forms refuse to overwrite a file modified since `expected`.
 BOOL wq_write(NSString *path, NSData *data, NSString *_Nullable *_Nullable errorText);
+BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary<NSString *, NSNumber *> *_Nullable expected,
+                           NSString *_Nullable *_Nullable errorText);
 
 // Same as wq_write / wq_create_file, but streamed from a local file (for large
 // files; nothing is held in memory). A failed create leaves no partial file.
@@ -50,6 +56,8 @@ NSData *_Nullable wq_read_range(NSString *path, unsigned long long offset, NSUIn
 // Overwrites bytes in place: offset -> replacement bytes. The file keeps its
 // size; it is backed up first, and flush/close errors are reported.
 BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString *_Nullable *_Nullable errorText);
+BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
+                           NSDictionary<NSString *, NSNumber *> *_Nullable expected, NSString *_Nullable *_Nullable errorText);
 
 // Creates a new file or folder inside dir.
 BOOL wq_create_file(NSString *path, NSData *data, NSString *_Nullable *_Nullable errorText);
