@@ -6,6 +6,7 @@
 
 #import "WQLaunchServices.h"
 #import "WQAccess.h"
+#import <stdlib.h>
 #import <string.h>
 #import <sys/stat.h>
 
@@ -235,6 +236,68 @@ static BOOL wq_is_data_container_path(NSString *path)
     return NO;
 }
 
+// Diagnostics: how many container paths the store holds, and which record
+// sizes and offsets refer to them. Only sizes and offsets are logged (no
+// names), so a Log from a release with a new layout shows where it moved.
+static int wq_u32_cmp(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void wq_ls_log_summary(const uint8_t *b, size_t n, NSUInteger bundleRecords, NSUInteger pluginRecords,
+                              NSUInteger names, NSUInteger mapped)
+{
+    NSMutableData *refData = [NSMutableData new];
+    static const char needle[] = "/var/mobile/Containers/Data/";
+    const size_t needleLen = sizeof(needle) - 1;
+    const uint8_t *cursor = b, *end = b + n;
+    while (cursor < end) {
+        const uint8_t *hit = memmem(cursor, (size_t)(end - cursor), needle, needleLen);
+        if (!hit) break;
+        cursor = hit + needleLen;
+        const uint8_t *start = hit;
+        if ((size_t)(hit - b) >= 8 && memcmp(hit - 8, "/private", 8) == 0) start = hit - 8;
+        size_t o = (size_t)(start - b);
+        if (o < 8 || o % 4) continue;
+        uint32_t len = wq_rd32(start - 4);
+        if (len < needleLen || len > 0x100 || len > (size_t)(end - start)) continue;
+        uint32_t ref = wq_rd32(start - 8) << 2;
+        if (ref) [refData appendBytes:&ref length:sizeof(ref)];
+        if (refData.length / sizeof(uint32_t) >= 20000) break;
+    }
+    NSUInteger pathCount = refData.length / sizeof(uint32_t);
+    uint32_t *refs = refData.mutableBytes;
+    if (pathCount) qsort(refs, pathCount, sizeof(uint32_t), wq_u32_cmp);
+    wq_log(@"names: store %.1f MB, %lu bundle and %lu plugin records, %lu names, %lu of %lu container paths mapped",
+           n / 1048576.0, (unsigned long)bundleRecords, (unsigned long)pluginRecords, (unsigned long)names,
+           (unsigned long)mapped, (unsigned long)pathCount);
+    if (!pathCount || mapped * 10 >= pathCount * 9) return;
+
+    // Vote for (record size, offset of the container reference).
+    NSCountedSet<NSNumber *> *votes = [NSCountedSet new];
+    for (size_t q = 0; q + 4 <= n; q += 4) {
+        uint32_t v = wq_rd32(b + q);
+        if (!v || (v & 3) || !bsearch(&v, refs, pathCount, sizeof(uint32_t), wq_u32_cmp)) continue;
+        for (size_t k = 0; k < 0x400 && q >= 8 + k; k += 4) {
+            uint32_t size = wq_rd32(b + q - 8 - k + 4);
+            if (size >= 0x40 && size <= 0x800 && size % 4 == 0 && k < size)
+                [votes addObject:@((uint64_t)size << 16 | k)];
+        }
+    }
+    NSArray *top = [votes.allObjects sortedArrayUsingComparator:^NSComparisonResult(NSNumber *x, NSNumber *y) {
+        NSUInteger cx = [votes countForObject:x], cy = [votes countForObject:y];
+        return cx > cy ? NSOrderedAscending : cx < cy ? NSOrderedDescending : [x compare:y];
+    }];
+    NSMutableArray *parts = [NSMutableArray new];
+    for (NSNumber *key in [top subarrayWithRange:NSMakeRange(0, MIN(top.count, (NSUInteger)8))]) {
+        uint64_t value = key.unsignedLongLongValue;
+        [parts addObject:[NSString stringWithFormat:@"0x%llx@0x%llx x%lu", value >> 16, value & 0xffff,
+                          (unsigned long)[votes countForObject:key]]];
+    }
+    wq_log(@"names: layout hint (record size@container offset): %@", [parts componentsJoinedByString:@", "]);
+}
+
 static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
                               NSDictionary **bundleNameOut, NSDictionary **containersOut)
 {
@@ -326,6 +389,7 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         return NO;
     }
     if (!recs.length) {
+        wq_ls_log_summary(b, n, 0, plugins.length / (2 * sizeof(uint32_t)), 0, 0);
         wq_log(@"names: LaunchServices store contains no bundle records");
         return NO;
     }
@@ -357,6 +421,8 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
 
     for (NSString *path in containers.allKeys)
         if (containers[path] == NSNull.null) [containers removeObjectForKey:path];
+    wq_ls_log_summary(b, n, recs.length / (4 * sizeof(uint32_t)), plugins.length / (2 * sizeof(uint32_t)),
+                      display.count, containers.count);
     if (displayOut) *displayOut = [display copy];
     if (bundleNameOut) *bundleNameOut = [bundleName copy];
     if (containersOut) *containersOut = [containers copy];
