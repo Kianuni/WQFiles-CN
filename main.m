@@ -342,7 +342,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 
 typedef NS_ENUM(NSInteger, WQViewKind) { WQViewText, WQViewPlist, WQViewImage, WQViewHex };
 
-@interface WQFileViewController : UIViewController
+@interface WQFileViewController : UIViewController <UITextViewDelegate>
 @property (nonatomic) BOOL readOnly;
 - (instancetype)initWithPath:(NSString *)path;
 @end
@@ -351,9 +351,13 @@ typedef NS_ENUM(NSInteger, WQViewKind) { WQViewText, WQViewPlist, WQViewImage, W
     NSString *_path;
     UITextView *_textView;
     UIImageView *_imageView;
+    UIBarButtonItem *_editButton;
     WQViewKind _kind;
     NSPropertyListFormat _plistFormat;
     BOOL _truncated;
+    BOOL _dirty;
+    BOOL _saving;
+    NSUInteger _revision;
 }
 
 static const NSUInteger kViewLimit = 4 * 1024 * 1024;
@@ -381,7 +385,10 @@ static const NSUInteger kHexLimit = 64 * 1024;
     _textView.smartQuotesType = UITextSmartQuotesTypeNo;
     _textView.smartDashesType = UITextSmartDashesTypeNo;
     _textView.alwaysBounceVertical = YES;
+    _textView.delegate = self;
     [self.view addSubview:_textView];
+    __weak typeof(self) weakSelf = self;
+    self.navigationItem.backAction = [UIAction actionWithHandler:^(UIAction *a) { [weakSelf leave]; }];
     _imageView = [UIImageView new];
     _imageView.translatesAutoresizingMaskIntoConstraints = NO;
     _imageView.contentMode = UIViewContentModeScaleAspectFit;
@@ -398,7 +405,6 @@ static const NSUInteger kHexLimit = 64 * 1024;
     }
     UIBarButtonItem *share = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction
                                                                            target:self action:@selector(share:)];
-    __weak typeof(self) weakSelf = self;
     UIMenu *openAs = [UIMenu menuWithTitle:@"Open As" children:@[
         [UIAction actionWithTitle:@"Plist Editor" image:[UIImage systemImageNamed:@"list.bullet.indent"] identifier:nil
                           handler:^(UIAction *a) { [weakSelf reopenAs:WQOpenPlist]; }],
@@ -499,21 +505,72 @@ static const NSUInteger kHexLimit = 64 * 1024;
     return out;
 }
 
+- (void)updateEditButton
+{
+    _editButton.title = _textView.editable ? @"Save" : @"Edit";
+    _editButton.style = _textView.editable ? UIBarButtonItemStyleDone : UIBarButtonItemStylePlain;
+    _editButton.enabled = !_saving;
+}
+
 - (void)enableEditing
 {
-    UIBarButtonItem *edit = [[UIBarButtonItem alloc] initWithTitle:@"Edit" style:UIBarButtonItemStylePlain
-                                                            target:self action:@selector(toggleEdit:)];
+    if (_editButton) return;
+    _editButton = [[UIBarButtonItem alloc] initWithTitle:@"Edit" style:UIBarButtonItemStylePlain
+                                                  target:self action:@selector(toggleEdit:)];
     NSArray *items = self.navigationItem.rightBarButtonItems;
-    self.navigationItem.rightBarButtonItems = [items arrayByAddingObject:edit];
+    self.navigationItem.rightBarButtonItems = [items arrayByAddingObject:_editButton];
+}
+
+- (void)textViewDidChange:(UITextView *)textView
+{
+    if (_saving) return;
+    _revision++;
+    _dirty = YES;
+}
+
+- (BOOL)blockWhileSaving
+{
+    if (!_saving) return NO;
+    wq_alert(self, @"Save in progress", @"Wait for the current save to finish before leaving or making more changes.");
+    return YES;
+}
+
+- (void)confirmLeaveThen:(void (^)(void))proceed
+{
+    if ([self blockWhileSaving]) return;
+    if (!_dirty) { proceed(); return; }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Discard changes?"
+        message:@"Your text changes have not been saved." preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Discard" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        self->_dirty = NO;
+        self->_revision++;
+        self->_textView.editable = NO;
+        [self->_textView resignFirstResponder];
+        [self updateEditButton];
+        proceed();
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)leave
+{
+    [self confirmLeaveThen:^{ [self.navigationController popViewControllerAnimated:YES]; }];
 }
 
 - (void)toggleEdit:(UIBarButtonItem *)sender
 {
+    if ([self blockWhileSaving]) return;
     if (!_textView.editable) {
         _textView.editable = YES;
-        sender.title = @"Save";
-        sender.style = UIBarButtonItemStyleDone;
+        [self updateEditButton];
         [_textView becomeFirstResponder];
+        return;
+    }
+    if (!_dirty) {
+        _textView.editable = NO;
+        [_textView resignFirstResponder];
+        [self updateEditButton];
         return;
     }
     NSData *newData = nil;
@@ -533,25 +590,30 @@ static const NSUInteger kHexLimit = 64 * 1024;
     } else {
         newData = [_textView.text dataUsingEncoding:NSUTF8StringEncoding];
     }
+    if (!newData) {
+        wq_alert(self, @"Cannot encode", @"The text could not be encoded as UTF-8.");
+        return;
+    }
     NSString *message = [NSString stringWithFormat:@"%@ will be overwritten in place. The current version is backed up to Backups first.", _path];
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Save changes?" message:message
                                                               preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        NSUInteger savedRevision = self->_revision;
+        self->_saving = YES;
+        self->_textView.editable = NO;
+        [self->_textView resignFirstResponder];
+        [self updateEditButton];
         NSString *path = self->_path;
         dispatch_async(wq_io(), ^{
             NSString *error = nil;
             BOOL ok = wq_write(path, newData, &error);
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!ok) {
-                    wq_alert(self, @"Save failed", wq_permission_hint(path, YES) ?: error);
-                    return;
-                }
-                self->_textView.editable = NO;
-                [self->_textView resignFirstResponder];
-                sender.title = @"Edit";
-                sender.style = UIBarButtonItemStylePlain;
-                [self load];
+                self->_saving = NO;
+                if (ok && self->_revision == savedRevision) self->_dirty = NO;
+                self->_textView.editable = self->_dirty;
+                [self updateEditButton];
+                if (!ok) wq_alert(self, @"Save failed", wq_permission_hint(path, YES) ?: error ?: @"Unknown error");
             });
         });
     }]];
@@ -565,11 +627,13 @@ static const NSUInteger kHexLimit = 64 * 1024;
 
 - (void)reopenAs:(WQOpenMode)mode
 {
-    UINavigationController *nav = self.navigationController;
-    NSString *path = _path;
-    BOOL readOnly = _readOnly;
-    [nav popViewControllerAnimated:NO];
-    wq_open_file(nav, path, readOnly, mode);
+    [self confirmLeaveThen:^{
+        UINavigationController *nav = self.navigationController;
+        NSString *path = self->_path;
+        BOOL readOnly = self->_readOnly;
+        [nav popViewControllerAnimated:NO];
+        wq_open_file(nav, path, readOnly, mode);
+    }];
 }
 
 @end
