@@ -517,36 +517,40 @@ static BOOL wq_pread_exact(int fd, void *buffer, size_t length, off_t offset)
 
 // Compare a complete intended document, or the complete backup with patches
 // overlaid in write order. Buffers stay bounded even for a very large hex file.
-static NSDictionary *wq_verified_saved_version(WQMutation *mutation, NSString *backup,
-                                               NSData *data, NSDictionary<NSNumber *, NSData *> *runs)
+static NSDictionary *wq_verified_saved_version(WQMutation *mutation, NSData *data,
+                                               NSDictionary<NSNumber *, NSData *> *runs)
 {
     struct stat before, after;
     if (fstat(mutation->fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0) return nil;
-    unsigned long long length = data ? data.length : (unsigned long long)mutation->before.st_size;
-    if ((unsigned long long)before.st_size != length) return nil;
-    int original = data ? -1 : WQOpenRegularAt(AT_FDCWD, backup.fileSystemRepresentation, O_RDONLY, 0);
-    if (!data && original < 0) return nil;
-    NSArray<NSNumber *> *offsets = [runs.allKeys sortedArrayUsingSelector:@selector(compare:)];
     uint8_t expected[65536], actual[65536];
     BOOL ok = YES;
-    for (unsigned long long offset = 0; offset < length && ok; ) {
-        size_t count = (size_t)MIN((unsigned long long)sizeof(expected), length - offset);
-        if (data) memcpy(expected, (const uint8_t *)data.bytes + (NSUInteger)offset, count);
-        else {
-            ok = wq_pread_exact(original, expected, count, (off_t)offset);
-            for (NSNumber *key in offsets) {
-                NSData *run = runs[key];
-                unsigned long long start = key.unsignedLongLongValue;
-                unsigned long long end = start + run.length; // ranges validated before mutation
-                unsigned long long first = MAX(offset, start), last = MIN(offset + count, end);
-                if (first < last) memcpy(expected + (size_t)(first - offset),
-                    (const uint8_t *)run.bytes + (NSUInteger)(first - start), (size_t)(last - first));
-            }
+    if (data) {
+        if ((unsigned long long)before.st_size != data.length) return nil;
+        for (unsigned long long offset = 0; offset < data.length && ok; ) {
+            size_t count = (size_t)MIN((unsigned long long)sizeof(expected), (unsigned long long)data.length - offset);
+            memcpy(expected, (const uint8_t *)data.bytes + (NSUInteger)offset, count);
+            ok = wq_pread_exact(mutation->fd, actual, count, (off_t)offset) &&
+                 memcmp(expected, actual, count) == 0;
+            offset += count;
         }
-        ok = ok && wq_pread_exact(mutation->fd, actual, count, (off_t)offset) && memcmp(expected, actual, count) == 0;
-        offset += count;
+    } else {
+        // A patch leaves every unedited byte untouched. The descriptor was
+        // pinned and version-checked; verifying the changed runs is sufficient
+        // and avoids reading the entire file for a one-byte edit.
+        if (!runs || (unsigned long long)before.st_size != (unsigned long long)mutation->before.st_size) return nil;
+        for (NSNumber *key in runs) {
+            NSData *run = runs[key];
+            unsigned long long start = key.unsignedLongLongValue;
+            if (!WQPatchRangeValid(start, run.length, (unsigned long long)before.st_size)) return nil;
+            for (NSUInteger done = 0; done < run.length && ok; ) {
+                size_t count = (size_t)MIN((NSUInteger)sizeof(expected), run.length - done);
+                ok = wq_pread_exact(mutation->fd, actual, count, (off_t)(start + done)) &&
+                     memcmp((const uint8_t *)run.bytes + done, actual, count) == 0;
+                done += (NSUInteger)count;
+            }
+            if (!ok) break;
+        }
     }
-    if (original >= 0) close(original);
     if (!ok || fstat(mutation->fd, &after) != 0 ||
         ![wq_version_for_stat(&before) isEqualToDictionary:wq_version_for_stat(&after)]) return nil;
     return wq_version_for_stat(&after);
@@ -565,7 +569,7 @@ static BOOL wq_mutation_finish(NSString *path, WQMutation *mutation, NSString *b
         ok = NO; failure = @"The target path was replaced during writing";
     }
     if (ok && (expectedData || expectedRuns)) {
-        verifiedVersion = wq_verified_saved_version(mutation, backup, expectedData, expectedRuns);
+        verifiedVersion = wq_verified_saved_version(mutation, expectedData, expectedRuns);
         if (!verifiedVersion || !wq_mutation_current(path, mutation, NO, errorText)) {
             ok = NO;
             rollbackAllowed = NO; // A concurrent writer may own the newer contents.

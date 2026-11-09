@@ -131,6 +131,13 @@ int main(void)
             close(locked);
             check(wq_patch(file, @{ @0: bytes(@"NEW") }, &error) && has(file, @"NEWer-target"), @"valid patch keeps size and remaining bytes");
             check(!wq_patch(file, @{ @999: bytes(@"bad") }, &error), @"out-of-range patch refused");
+            NSString *large = [base stringByAppendingPathComponent:@"large-patch"];
+            NSMutableData *largeData = [NSMutableData dataWithLength:300000];
+            check([largeData writeToFile:large atomically:YES], @"write large patch fixture");
+            check(wq_patch(large, @{ @299999: bytes(@"Z") }, &error), @"large patch verifies only its changed range");
+            NSData *largeAfter = [NSData dataWithContentsOfFile:large];
+            check(largeAfter.length == 300000 && ((const uint8_t *)largeAfter.bytes)[299999] == 'Z',
+                  @"large patch keeps size and writes the final byte");
 
             NSString *fifo = [base stringByAppendingPathComponent:@"fifo"];
             check(mkfifo(fifo.fileSystemRepresentation, 0600) == 0, @"create temp FIFO");
