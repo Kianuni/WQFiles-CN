@@ -2221,12 +2221,23 @@ static BOOL wq_replace_part(NSString *src, NSString *dst, NSString **error)
                     error ?: @"see Log"];
         return;
     }
-    // 3. Replace each part; on any failure put the previous data back.
+    // 3. Restore the complete Documents/Library state. A part absent from the
+    // backup must also be absent afterwards, not silently survive the restore.
     error = nil;
     BOOL ok = YES;
-    for (NSString *part in parts) {
-        if (!wq_replace_part([backup stringByAppendingPathComponent:part],
-                             [app.container stringByAppendingPathComponent:part], &error)) { ok = NO; break; }
+    for (NSString *part in @[@"Documents", @"Library"]) {
+        NSString *src = [backup stringByAppendingPathComponent:part];
+        NSString *dst = [app.container stringByAppendingPathComponent:part];
+        if ([parts containsObject:part]) {
+            if (!wq_replace_part(src, dst, &error)) { ok = NO; break; }
+        } else {
+            unsigned long long ignored = 0;
+            if (!wq_purge_contents(dst, &ignored)) {
+                ok = NO;
+                error = [NSString stringWithFormat:@"Could not remove current %@", part];
+                break;
+            }
+        }
     }
     if (ok) {
         wq_log(@"restore %@ from %@: OK", app.bundleID, backup.lastPathComponent);
@@ -2238,7 +2249,7 @@ static BOOL wq_replace_part(NSString *src, NSString *dst, NSString **error)
     wq_log(@"restore %@ from %@: FAILED (%@), rolling back", app.bundleID, backup.lastPathComponent, error);
     NSString *rollbackError = nil;
     BOOL rolledBack = YES;
-    for (NSString *part in parts) {
+    for (NSString *part in @[@"Documents", @"Library"]) {
         NSString *saved = [safety stringByAppendingPathComponent:part];
         NSString *dst = [app.container stringByAppendingPathComponent:part];
         if ([fm fileExistsAtPath:saved]) {
