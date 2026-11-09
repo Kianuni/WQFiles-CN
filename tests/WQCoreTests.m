@@ -26,6 +26,11 @@ static void TestHexParsing(void)
     WQCheck(WQParseHex(@"00-ff", NO) == nil);
     WQCheck(WQParseHex(@"００", NO) == nil);  // full-width digits are not ASCII hex
     WQCheck(WQParseHex(@" \n\t", NO).length == 0);
+    WQCheck([WQParseHex(@"\u2003de\u00a0ad\vbe", NO)
+             isEqualToData:WQParseHex(@"deadbe", NO)]);
+    WQCheck(WQParseHex(@"aa z", NO) == nil);
+    WQCheck(WQParseHex(@"0g", NO) == nil);
+    WQCheck(WQParseHex(@"", YES).length == 0);
 }
 
 static void TestPatchRanges(void)
@@ -63,6 +68,13 @@ static void TestEditRevisions(void)
     NSUInteger beforeDiscard = state.revision;
     [state discard];
     WQCheck(!state.dirty && state.revision == beforeDiscard + 1);
+
+    [state noteChange];
+    saved = [state beginSave];
+    NSUInteger discardedRevision = state.revision;
+    [state discard];
+    [state finishSave:YES revision:saved];
+    WQCheck(!state.saving && !state.dirty && state.revision == discardedRevision + 1);
 }
 
 static void TestRestorePlanning(void)
@@ -77,6 +89,10 @@ static void TestRestorePlanning(void)
     NSDictionary *libraryOnly = WQRestorePlan(NO, YES);
     WQCheck(![libraryOnly[@"Documents"] boolValue]);
     WQCheck([libraryOnly[@"Library"] boolValue]);
+
+    NSDictionary *neither = WQRestorePlan(NO, NO);
+    WQCheck(neither.count == 2);
+    WQCheck(![neither[@"Documents"] boolValue] && ![neither[@"Library"] boolValue]);
 }
 
 int main(void)
