@@ -98,6 +98,15 @@ static inline BOOL WQWriteBytes(int fd, NSData *data)
 
 // A durable intent file precedes the rename. The preserved directory itself is
 // never removed. Recovery accepts only our exact symlink or the original inode.
+//
+// Durability: this runs for every access grant (a Cache Cleaner scan makes
+// over a thousand), so only the marker's contents are flushed. That flush is
+// what recovery relies on: a marker that can't be read while the preserved
+// directory exists must fail closed, so its contents have to reach the disk
+// before Caches is renamed. The directory operations themselves need no flush:
+// after an app crash or kill they are already in place, and APFS commits
+// changes to one directory in order, so a power loss leaves one of the states
+// WQCacheSwapRecover handles.
 static const char *const WQCacheMarker = ".wq-caches-swap.plist";
 static const char *const WQCacheMarkerTemp = ".wq-caches-swap.plist.tmp";
 static const char *const WQCacheSaved = ".wq-caches-preserved";
@@ -171,12 +180,11 @@ static inline BOOL WQCacheSwapRecover(int library)
             if (![record[@"Target"] isEqualToString:[NSString stringWithUTF8String:link]]) { errno = EEXIST; return NO; }
             if (unlinkat(library, "Caches", 0) != 0) return NO;
         }
-        if (renameatx_np(library, WQCacheSaved, library, "Caches", RENAME_EXCL) != 0 || fsync(library) != 0) return NO;
+        if (renameatx_np(library, WQCacheSaved, library, "Caches", RENAME_EXCL) != 0) return NO;
     } else if (!cachesExists || !S_ISDIR(current.st_mode) || !WQSameObject(&current, &expected)) {
         errno = EINVAL; return NO;
     }
-    if (unlinkat(library, WQCacheMarker, 0) != 0) return NO;
-    return fsync(library) == 0;
+    return unlinkat(library, WQCacheMarker, 0) == 0;
 }
 
 // Normal startup performs no writes. Only an existing recovery marker or saved
@@ -218,9 +226,9 @@ static inline BOOL WQCacheSwapBegin(int library, NSString *target)
     unlinkat(library, WQCacheMarkerTemp, 0);
     int marker = WQOpenRegularAt(library, WQCacheMarkerTemp, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (marker < 0) return NO;
-    BOOL durable = WQWriteBytes(marker, data);
+    BOOL durable = WQWriteBytes(marker, data);   // flushes the marker's contents
     if (close(marker) != 0) durable = NO;
-    if (!durable || fsync(library) != 0) {
+    if (!durable) {
         unlinkat(library, WQCacheMarkerTemp, 0);
         return NO;
     }
@@ -228,9 +236,8 @@ static inline BOOL WQCacheSwapBegin(int library, NSString *target)
         unlinkat(library, WQCacheMarkerTemp, 0);
         return NO;
     }
-    if (fsync(library) != 0) return NO;
-    if (renameatx_np(library, "Caches", library, WQCacheSaved, RENAME_EXCL) != 0 || fsync(library) != 0) return NO;
-    return symlinkat(target.fileSystemRepresentation, library, "Caches") == 0 && fsync(library) == 0;
+    if (renameatx_np(library, "Caches", library, WQCacheSaved, RENAME_EXCL) != 0) return NO;
+    return symlinkat(target.fileSystemRepresentation, library, "Caches") == 0;
 }
 
 static inline BOOL WQAbsolutePathGrammar(NSString *path)
