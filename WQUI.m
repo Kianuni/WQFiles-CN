@@ -68,7 +68,16 @@ static NSData *wq_icon_fingerprint(UIImage *img)
 static UIImage *wq_raw_icon(NSString *bundleID)
 {
     if (![UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) return nil;
-    return [UIImage _applicationIconImageForBundleIdentifier:bundleID format:2 scale:UIScreen.mainScreen.scale];
+    CGFloat scale = 2.0; // Safe fallback for background preparation without UI context.
+    if (NSThread.isMainThread) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if ([scene isKindOfClass:UIWindowScene.class] && scene.activationState == UISceneActivationStateForegroundActive) {
+                scale = ((UIWindowScene *)scene).screen.scale;
+                break;
+            }
+        }
+    }
+    return [UIImage _applicationIconImageForBundleIdentifier:bundleID format:2 scale:scale];
 }
 
 // The real icon for bundleID, or nil when iOS only has its placeholder.
