@@ -14,12 +14,29 @@
 static const NSUInteger kPageSize = 64 * 1024;
 static const NSUInteger kSearchChunk = 1024 * 1024;
 
+static BOOL wqh_is_visible(UIViewController *host)
+{
+    if (!host.isViewLoaded || !host.view.window) return NO;
+    UINavigationController *navigation = host.navigationController;
+    return !navigation || navigation.visibleViewController == host;
+}
+
 static void wqh_alert(UIViewController *host, NSString *title, NSString *message)
 {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message
-                                                         preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [host presentViewController:a animated:YES completion:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!wqh_is_visible(host)) return;
+        UIViewController *presented = host.presentedViewController;
+        if (presented && ![presented isKindOfClass:UIAlertController.class]) return;
+        void (^present)(void) = ^{
+            if (!wqh_is_visible(host) || host.presentedViewController) return;
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [host presentViewController:a animated:YES completion:nil];
+        };
+        if (presented) [presented dismissViewControllerAnimated:YES completion:present];
+        else present();
+    });
 }
 
 @implementation WQHexViewController {
@@ -35,6 +52,8 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
     NSDictionary<NSString *, NSNumber *> *_version;
     unsigned long long _matchOffset;
     NSUInteger _matchLength;
+    NSData *_lastSearchNeedle;
+    NSUInteger _searchGeneration;
     NSString *_status;
     dispatch_queue_t _queue;
 }
@@ -81,6 +100,15 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
         });
     });
     [self updateBar];
+}
+
+- (void)viewDidDisappear:(BOOL)animated
+{
+    [super viewDidDisappear:animated];
+    _searchGeneration++;
+    _lastSearchNeedle = nil;
+    _matchLength = 0;
+    _status = nil;
 }
 
 - (UIFont *)rowFont
@@ -435,8 +463,16 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
         }
         NSData *needle = hex ? WQParseHex(t, NO) : [t dataUsingEncoding:NSUTF8StringEncoding];
         if (needle.length == 0) { wqh_alert(self, @"Nothing to find", hex ? @"Enter hex bytes, e.g. de ad be ef." : @"Enter some text."); return; }
-        NSIndexPath *top = self.tableView.indexPathsForVisibleRows.firstObject;
-        unsigned long long from = self->_matchLength ? self->_matchOffset + 1 : (unsigned long long)top.row * self->_perRow;
+        BOOL sameNeedle = self->_lastSearchNeedle && [self->_lastSearchNeedle isEqualToData:needle];
+        NSInteger topRow = NSIntegerMax;
+        for (NSIndexPath *indexPath in self.tableView.indexPathsForVisibleRows) {
+            if (indexPath.section == 0) topRow = MIN(topRow, indexPath.row);
+        }
+        if (topRow == NSIntegerMax) topRow = 0;
+        unsigned long long from = (sameNeedle && self->_matchLength && self->_matchOffset < ULLONG_MAX)
+            ? self->_matchOffset + 1 : (unsigned long long)topRow * self->_perRow;
+        if (!sameNeedle) self->_matchLength = 0;
+        self->_lastSearchNeedle = [needle copy];
         [self search:needle from:from];
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -444,21 +480,26 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
 
 - (void)search:(NSData *)needle from:(unsigned long long)from
 {
+    NSUInteger generation = ++_searchGeneration;
     _status = @"Searching…";
     [self updateBar];
     NSString *path = _path;
     unsigned long long size = _size;
+    NSUInteger requestLength = kSearchChunk + needle.length - 1;
     dispatch_async(_queue, ^{
         unsigned long long found = ULLONG_MAX;
         NSString *error = nil;
         for (unsigned long long pos = from; pos < size && found == ULLONG_MAX; ) {
-            NSData *chunk = wq_read_range(path, pos, kSearchChunk + needle.length - 1, &error);
+            NSUInteger length = (NSUInteger)MIN((unsigned long long)requestLength, size - pos);
+            NSData *chunk = wq_read_range(path, pos, length, &error);
             if (!chunk || chunk.length < needle.length) break;
             NSRange r = [chunk rangeOfData:needle options:0 range:NSMakeRange(0, chunk.length)];
             if (r.location != NSNotFound) found = pos + r.location;
+            if (size - pos <= kSearchChunk) break;
             pos += kSearchChunk;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->_searchGeneration || !wqh_is_visible(self)) return;
             self->_status = nil;
             [self updateBar];
             if (found == ULLONG_MAX) {
