@@ -397,7 +397,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     NSString *_query;
     NSString *_status;   // scan / clean progress, nil when idle
     NSString *_result;   // last clean result
-    BOOL _scanning, _cleaning, _scanLimited;
+    BOOL _scanning, _cleaning, _scanLimited, _cleanRequiresRescan;
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
 }
@@ -463,10 +463,10 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     for (WQCacheItem *it in _items) if (it.selected) n++;
     UIBarButtonItem *clean = [[UIBarButtonItem alloc] initWithTitle:@"Clean" style:wq_primary_button_style()
                                                              target:self action:@selector(confirmClean)];
-    clean.enabled = n > 0 && !_scanLimited;
+    clean.enabled = n > 0 && !_cleanRequiresRescan;
     NSArray *visible = self.visibleItems;
     BOOL allVisible = visible.count > 0;
-    for (WQCacheItem *it in visible) if (!it.selected) { allVisible = NO; break; }
+    for (WQCacheItem *it in visible) if (it.limited || !it.selected) { allVisible = NO; break; }
     __weak typeof(self) weakSelf = self;
     UIAction *__unused all = [UIAction actionWithTitle:@"Select All" image:[UIImage systemImageNamed:@"checkmark.circle"]
                                    identifier:nil handler:^(UIAction *__unused a) { [weakSelf selectWhere:^BOOL(WQCacheItem *__unused it) { return YES; }]; }];
@@ -491,6 +491,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     NSUInteger generation = ++_scanGeneration;
     _scanning = YES;
     _scanLimited = NO;
+    _cleanRequiresRescan = NO;
     _result = nil;
     [self updateButtons];
     [self setStatus:@"Finding apps…"];
@@ -501,6 +502,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
         NSUInteger failedEnumerations = 0;
         NSUInteger limitedContainers = 0;
         NSUInteger limitedMeasurements = 0;
+        NSUInteger missingIdentities = 0;
         NSArray *roots = @[@"/private/var/mobile/Containers/Data/Application",
                            @"/private/var/mobile/Containers/Data/PluginKitPlugin"];
         for (NSString *root in roots) {
@@ -576,7 +578,12 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
                     WQCacheTargetRecordForPath(tmp, @"tmp"),
                 ];
                 WQCacheCaptureContainerIdentity(item);
-                item.selected = YES;
+                if (!bid.length || !item.containerIdentityKnown) {
+                    item.limited = YES;
+                    scanLimited = YES;
+                    missingIdentities++;
+                }
+                item.selected = !item.limited;
                 [items addObject:item];
             }
         }
@@ -600,7 +607,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
             logs.crashLogs = YES;
             logs.limited = crashState == WQCacheMeasurementLimited;
             logs.targetRecords = @[WQCacheTargetRecordForPath(kCrashLogsPath, nil)];
-            logs.selected = YES;
+            logs.selected = !logs.limited;
             [items addObject:logs];
         }
         [items sortUsingComparator:^NSComparisonResult(WQCacheItem *a, WQCacheItem *b) {
@@ -619,9 +626,13 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
             [notes addObject:[NSString stringWithFormat:@"%lu cache tree measurement%@ was limited",
                               (unsigned long)limitedMeasurements, limitedMeasurements == 1 ? @"" : @"s"]];
         }
+        if (missingIdentities) {
+            [notes addObject:[NSString stringWithFormat:@"%lu container%@ had no identifier or identity",
+                              (unsigned long)missingIdentities, missingIdentities == 1 ? @"" : @"s"]];
+        }
         NSString *note = nil;
         if (scanLimited) {
-            [notes addObject:@"cleaning is disabled until a complete scan succeeds"];
+            [notes addObject:@"limited rows are excluded; the remaining rows can still be cleaned"];
             note = [NSString stringWithFormat:@"Scan incomplete: %@. See Log.", [notes componentsJoinedByString:@"; "]];
         } else if (emptyRoots.count) {
             note = [NSString stringWithFormat:@"No %@ container%@ found.",
@@ -652,8 +663,11 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 {
     if (section == 0 || !_items.count) return nil;
     NSUInteger shown = self.visibleItems.count;
+    NSUInteger appCount = 0;
+    for (WQCacheItem *item in _items) if (!item.crashLogs) appCount++;
+    if (!appCount) return @"Crash Logs";
     return _query.length ? [NSString stringWithFormat:@"%lu of %lu", (unsigned long)shown, (unsigned long)_items.count]
-                         : [NSString stringWithFormat:@"%lu apps and extensions", (unsigned long)_items.count];
+                         : [NSString stringWithFormat:@"%lu apps and extensions", (unsigned long)appCount];
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
@@ -708,6 +722,11 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == 0 || _scanning || _cleaning) return;
     WQCacheItem *item = self.visibleItems[(NSUInteger)indexPath.row];
+    if (item.limited) {
+        wq_alert(self, @"Not cleanable",
+                 @"This row has incomplete access or identity information. Scan again while the app is closed, or use its file browser entry to inspect it.");
+        return;
+    }
     item.selected = !item.selected;
     [tableView reloadRowsAtIndexPaths:@[indexPath, [NSIndexPath indexPathForRow:0 inSection:0]]
                      withRowAnimation:UITableViewRowAnimationNone];
@@ -729,7 +748,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
                                                     actionProvider:^UIMenu *(NSArray<UIMenuElement *> *__unused suggested) {
         NSMutableArray *actions = [NSMutableArray new];
-        if (!item.bundleID) {
+        if (item.crashLogs) {
             NSString *root = item.targets.firstObject;
             [actions addObject:[UIAction actionWithTitle:@"Show Crash Logs in File Browser" image:[UIImage systemImageNamed:@"folder"]
                                               identifier:nil handler:^(UIAction *__unused a) { [weakSelf openFolder:root title:@"Crash Logs"]; }]];
@@ -758,7 +777,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 // Applies to the rows the current search shows.
 - (void)selectWhere:(BOOL (^)(WQCacheItem *item))rule
 {
-    for (WQCacheItem *it in self.visibleItems) it.selected = rule(it);
+    for (WQCacheItem *it in self.visibleItems) it.selected = !it.limited && rule(it);
     [self.tableView reloadData];
     [self updateButtons];
 }
@@ -806,6 +825,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_cleaning = NO;
                 self->_scanLimited = YES;
+                self->_cleanRequiresRescan = YES;
                 self->_status = nil;
                 self->_result = [NSString stringWithFormat:@"Clean cancelled: %@. Scan again before retrying.", validationFailure];
                 [self.tableView reloadData];
@@ -837,6 +857,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
             self->_cleaning = NO;
             if (validationFailure) {
                 self->_scanLimited = YES;
+                self->_cleanRequiresRescan = YES;
                 self->_status = nil;
                 self->_result = [NSString stringWithFormat:@"Clean stopped: %@. Scan again before retrying.", validationFailure];
                 [self.tableView reloadData];

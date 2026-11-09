@@ -36,6 +36,11 @@ require(text_save, "wq_write_if_unchanged_get_version", "descriptor-verified tex
 forbid(text_save, "wq_file_version(", "post-write pathname version adoption")
 
 require(header, "void wq_share_cancel(UIViewController *host);", "share cancellation API")
+cache = (ROOT / "WQCache.m").read_text()
+require(cache, "_cleanRequiresRescan", "clean requires rescan after a validation failure")
+require(cache, "item.selected = !item.limited", "limited cache rows are not selected")
+require(cache, "if (item.crashLogs)", "crash-log context menu branch")
+require(cache, "NSUInteger appCount = 0;", "cache header excludes crash logs from app count")
 require(sharing, "__weak UIViewController *weakHost", "weak sharing host")
 require(sharing, "preparation.cancelled", "abandoned folder preparation")
 require(sharing, "wq_remove_export(outDir)", "abandoned export cleanup")
