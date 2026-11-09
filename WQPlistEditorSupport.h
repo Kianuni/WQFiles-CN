@@ -32,6 +32,23 @@ static inline BOOL WQPSerializedDataWithinLimit(NSData *data)
     return data.length <= WQPMaxSerializedBytes;
 }
 
+// CoreFoundation can write only XML and binary property lists. OpenStep and
+// unknown formats are readable but must be treated as read-only documents.
+static inline BOOL WQPlistFormatIsWritable(NSPropertyListFormat format)
+{
+    return format == NSPropertyListXMLFormat_v1_0 || format == NSPropertyListBinaryFormat_v1_0;
+}
+
+static inline NSString *WQPlistFormatName(NSPropertyListFormat format)
+{
+    switch (format) {
+        case NSPropertyListXMLFormat_v1_0: return @"XML";
+        case NSPropertyListBinaryFormat_v1_0: return @"Binary";
+        case NSPropertyListOpenStepFormat: return @"OpenStep";
+        default: return @"Unknown";
+    }
+}
+
 static inline NSString *WQPBoundedStringPreview(NSString *value)
 {
     if (value.length == 0) return @"(empty)";

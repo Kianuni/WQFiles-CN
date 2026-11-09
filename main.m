@@ -20,6 +20,7 @@
 #import "WQCache.h"
 #import "WQCore.h"
 #import "WQPlistEditor.h"
+#import "WQPlistEditorSupport.h"
 #import "WQHexViewer.h"
 
 static BOOL wq_looks_like_uuid(NSString *name)
@@ -188,6 +189,12 @@ static const NSUInteger kHexLimit = 64 * 1024;
                 _kind = WQViewPlist;
                 _plistFormat = format;
                 _textView.text = text;
+                if (!WQPlistFormatIsWritable(format)) {
+                    _readOnly = YES;
+                    NSString *prompt = self.navigationItem.prompt;
+                    NSString *reason = [NSString stringWithFormat:@"%@ · read only", WQPlistFormatName(format)];
+                    self.navigationItem.prompt = prompt.length ? [prompt stringByAppendingFormat:@" · %@", reason] : reason;
+                }
                 if (!_readOnly) [self enableEditing];
                 return;
             }

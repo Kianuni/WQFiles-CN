@@ -220,6 +220,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
                 self.status = nil;
             } else {
                 if (wq_permission_hint(path, YES)) self.doc.readOnly = YES;   // readable, but only the owner may write
+                if (!WQPlistFormatIsWritable(format)) self.doc.readOnly = YES; // OpenStep/unknown format
                 self.doc.root = root;
                 self.doc.format = format;
                 self.container = root;
@@ -343,11 +344,15 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 {
     if ([self blockWhileSaving] || self.doc.readOnly || !self.doc.edit.dirty) return;
     WQPlistDocument *doc = self.doc;
+    if (!WQPlistFormatIsWritable(doc.format)) {
+        wqp_alert(self, @"Read-only format", @"This property list uses an OpenStep/unknown format that cannot be saved by the editor. Use Open as XML Text and choose a supported format explicitly.");
+        return;
+    }
     if (!doc.version) {
         wqp_alert(self, @"Cannot save safely", @"The current file version is unavailable. Reopen the file before saving again.");
         return;
     }
-    NSString *fmt = doc.format == NSPropertyListXMLFormat_v1_0 ? @"XML" : @"binary";
+    NSString *fmt = WQPlistFormatName(doc.format);
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Save changes?"
         message:[NSString stringWithFormat:@"%@ is overwritten in place (%@ format). The current version is backed up first.",
                  doc.path, fmt]
@@ -444,9 +449,12 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 {
     if (self.status) return self.status;
     if (!self.isRoot) return nil;
-    NSString *fmt = self.doc.format == NSPropertyListXMLFormat_v1_0 ? @"XML" : @"Binary";
-    return self.doc.readOnly ? [NSString stringWithFormat:@"%@ property list · read only", fmt]
-                             : [NSString stringWithFormat:@"%@ property list. Tap a value to edit it, swipe to delete or rename, + to add.", fmt];
+    NSString *fmt = WQPlistFormatName(self.doc.format);
+    if (self.doc.readOnly) {
+        NSString *reason = WQPlistFormatIsWritable(self.doc.format) ? @"read only" : @"read only · writing is not supported";
+        return [NSString stringWithFormat:@"%@ property list · %@", fmt, reason];
+    }
+    return [NSString stringWithFormat:@"%@ property list. Tap a value to edit it, swipe to delete or rename, + to add.", fmt];
 }
 
 - (id)keyAt:(NSInteger)row

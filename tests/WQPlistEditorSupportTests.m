@@ -49,6 +49,20 @@ static void TestPreviewAndSerializedLimits(void)
     WQCheck(!WQPSerializedDataWithinLimit(overLimit));
 }
 
+static void TestFormatPolicy(void)
+{
+    WQCheck(WQPlistFormatIsWritable(NSPropertyListXMLFormat_v1_0));
+    WQCheck(WQPlistFormatIsWritable(NSPropertyListBinaryFormat_v1_0));
+    WQCheck(!WQPlistFormatIsWritable(NSPropertyListOpenStepFormat));
+    WQCheck([WQPlistFormatName(NSPropertyListOpenStepFormat) isEqualToString:@"OpenStep"]);
+    WQCheck([WQPlistFormatName(NSPropertyListXMLFormat_v1_0) isEqualToString:@"XML"]);
+    NSData *openStep = [@"{ foo = bar; }" dataUsingEncoding:NSUTF8StringEncoding];
+    NSPropertyListFormat format = 0;
+    id plist = [NSPropertyListSerialization propertyListWithData:openStep options:0 format:&format error:nil];
+    WQCheck(plist != nil);
+    WQCheck(!WQPlistFormatIsWritable(format));
+}
+
 static void TestKeyedArchiveUIDs(void)
 {
     NSData *archive = [NSKeyedArchiver archivedDataWithRootObject:@{ @"a": @"b" }
@@ -88,6 +102,7 @@ int main(void)
     @autoreleasepool {
         TestInputLimits();
         TestPreviewAndSerializedLimits();
+        TestFormatPolicy();
         TestKeyedArchiveUIDs();
         if (failures) {
             fprintf(stderr, "%d plist support regression check(s) failed\n", failures);
