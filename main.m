@@ -502,6 +502,7 @@ static NSString *wq_folder_date_text(NSDate *date)
     CGFloat _headerWidth;
     NSString *_error;
     BOOL _labels;
+    BOOL _backupManager;
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
     BOOL _scanInFlight;
@@ -517,6 +518,9 @@ static NSString *wq_folder_date_text(NSDate *date)
         // Container parents: show bundle/group identifiers instead of UUIDs.
         NSString *parent = path.lastPathComponent;
         _labels = [@[@"Application", @"AppGroup", @"PluginKitPlugin", @"InternalDaemon", @"System"] containsObject:parent];
+        NSString *appBackups = wq_app_backup_root();
+        _backupManager = appBackups.length &&
+            ([_path isEqualToString:appBackups] || [_path hasPrefix:[appBackups stringByAppendingString:@"/"]]);
     }
     return self;
 }
@@ -529,7 +533,7 @@ static NSString *wq_folder_date_text(NSDate *date)
     __weak typeof(self) weakSelf = self;
     NSString *path = _path;
     NSMutableArray<UIMenuElement *> *menuItems = [NSMutableArray new];
-    if (!self.readOnly) {
+    if (!self.readOnly && !_backupManager) {
         [menuItems addObject:[UIAction actionWithTitle:@"New Folder" image:[UIImage systemImageNamed:@"folder.badge.plus"] identifier:nil
                           handler:^(UIAction *__unused a) { [weakSelf promptNewFolder]; }]];
         [menuItems addObject:[UIAction actionWithTitle:@"Import File" image:[UIImage systemImageNamed:@"square.and.arrow.down"] identifier:nil
@@ -876,7 +880,8 @@ static NSString *wq_folder_date_text(NSDate *date)
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
         actionProvider:^UIMenu *(NSArray<UIMenuElement *> *__unused suggested) {
         WQItem *current = currentItem();
-        if (!current) return nil;
+        WQDirViewController *strongSelf = weakSelf;
+        if (!current || !strongSelf) return nil;
         NSMutableArray *actions = [NSMutableArray new];
         if (current.isDir) {
             [actions addObject:[UIAction actionWithTitle:@"Share as ZIP (AirDrop…)" image:[UIImage systemImageNamed:@"square.and.arrow.up"]
@@ -927,7 +932,21 @@ static NSString *wq_folder_date_text(NSDate *date)
                 if (latest) UIPasteboard.generalPasteboard.string = latest.bundleID ?: latest.label;
             }]];
         }
-        if (!weakSelf.readOnly) {
+        if (strongSelf->_backupManager && current.isDir) {
+            NSString *appRoot = wq_app_backup_root();
+            NSString *parent = current.path.stringByDeletingLastPathComponent;
+            NSString *grandparent = parent.stringByDeletingLastPathComponent;
+            if (appRoot.length && ([parent isEqualToString:appRoot] || [grandparent isEqualToString:appRoot])) {
+                UIAction *remove = [UIAction actionWithTitle:@"Delete Backup…" image:[UIImage systemImageNamed:@"trash"]
+                                                  identifier:nil handler:^(UIAction *__unused a) {
+                    WQItem *latest = currentItem();
+                    if (latest) [weakSelf confirmDeleteBackup:latest];
+                }];
+                remove.attributes = UIMenuElementAttributesDestructive;
+                [actions addObject:remove];
+            }
+        }
+        if (!strongSelf.readOnly && !strongSelf->_backupManager) {
             [actions addObject:[UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"]
                                               identifier:nil handler:^(UIAction *__unused a) { WQItem *latest = currentItem(); if (latest) [weakSelf promptRename:latest]; }]];
             UIAction *del = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"]
@@ -977,6 +996,22 @@ static NSString *wq_folder_date_text(NSDate *date)
     [alert addAction:[UIAlertAction actionWithTitle:@"Rename" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         NSString *name = alert.textFields.firstObject.text;
         [self runIO:^BOOL(NSString **error) { return wq_rename(item.path, name, error); } failure:@"Cannot rename"];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)confirmDeleteBackup:(WQItem *)item
+{
+    BOOL bundle = [item.path.stringByDeletingLastPathComponent isEqualToString:wq_app_backup_root()];
+    NSString *message = bundle
+        ? [NSString stringWithFormat:@"%@\n\nThis removes every backup for this app. It cannot be undone.", item.path]
+        : [NSString stringWithFormat:@"%@\n\nThis removes the selected backup. It cannot be undone.", item.path];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Delete backup?"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
+        [self runIO:^BOOL(NSString **error) { return wq_delete_backup(item.path, error); } failure:@"Cannot delete backup"];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -1372,7 +1407,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
-    return section == 0 ? (NSInteger)_locations.count + 1 : 5;
+    return section == 0 ? (NSInteger)_locations.count + 1 : 6;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section
@@ -1402,7 +1437,8 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
             c.image = [UIImage systemImageNamed:@"lock.square.stack"];
         }
     } else {
-        NSArray *tools = @[@[@"Apps", @"square.grid.3x3"], @[@"Cache Cleaner", @"trash"], @[@"Go to Path…", @"arrow.right.circle"], @[@"Backups", @"clock.arrow.circlepath"], @[@"Log", @"doc.plaintext"]];
+        NSArray *tools = @[@[@"Apps", @"square.grid.3x3"], @[@"Cache Cleaner", @"trash"], @[@"Go to Path…", @"arrow.right.circle"],
+                           @[@"App Backups", @"clock.arrow.circlepath"], @[@"Backups", @"clock.arrow.circlepath"], @[@"Log", @"doc.plaintext"]];
         c.text = tools[(NSUInteger)indexPath.row][0];
         c.image = [UIImage systemImageNamed:tools[(NSUInteger)indexPath.row][1]];
     }
@@ -1430,6 +1466,9 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
         [self goToPath];
         return;
     } else if (indexPath.row == 3) {
+        [NSFileManager.defaultManager createDirectoryAtPath:wq_app_backup_root() withIntermediateDirectories:YES attributes:nil error:nil];
+        next = [[WQDirViewController alloc] initWithPath:wq_app_backup_root() title:@"App Backups"];
+    } else if (indexPath.row == 4) {
         [NSFileManager.defaultManager createDirectoryAtPath:wq_backup_root() withIntermediateDirectories:YES attributes:nil error:nil];
         next = [[WQDirViewController alloc] initWithPath:wq_backup_root() title:@"Backups"];
     } else {

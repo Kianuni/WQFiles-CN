@@ -82,6 +82,10 @@ BOOL wq_create_dir(NSString *path, NSString *_Nullable *_Nullable errorText);
 
 // Deletes a file (backed up first) or an empty folder.
 BOOL wq_delete(NSString *path, NSString *_Nullable *_Nullable errorText);
+// Explicit, user-confirmed removal of an app backup folder. Unlike wq_delete,
+// this is allowed inside AppBackups, but only for a bundle or date folder
+// directly below the app backup root. No safety copy is made.
+BOOL wq_delete_backup(NSString *path, NSString *_Nullable *_Nullable errorText);
 BOOL wq_rename(NSString *path, NSString *newName, NSString *_Nullable *_Nullable errorText);
 
 // lstat with access retry. Returns NO if the item does not exist.

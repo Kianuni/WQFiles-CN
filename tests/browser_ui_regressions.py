@@ -34,6 +34,8 @@ forbid(main, "wq_backup_root().stringByDeletingLastPathComponent title:@\"Backup
 forbid(main, "item.isDir = S_ISDIR(target.st_mode);", "symlink target directory override")
 require(main, "WQ Files does not follow symbolic links", "symlink UI contract")
 require(main, "latest.bundleID ?: latest.label", "copy identifier uses the identifier")
+require(main, "@\"App Backups\"", "App Backups shortcut")
+require(main, "wq_delete_backup", "explicit backup management deletion")
 text_save = main.split("- (void)toggleEdit:", 1)[1].split("- (void)share:", 1)[0]
 require(text_save, "wq_write_if_unchanged_get_version", "descriptor-verified text save result")
 forbid(text_save, "wq_file_version(", "post-write pathname version adoption")

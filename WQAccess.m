@@ -978,6 +978,53 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
     return wq_patch_if_unchanged(path, runs, nil, errorText);
 }
 
+BOOL wq_delete_backup(NSString *path, NSString **errorText)
+{
+    NSString *root = WQCanonicalVarPath(wq_app_backup_root());
+    NSString *canonical = WQCanonicalVarPath(path);
+    if (!root.length || !WQAbsolutePathGrammar(canonical) ||
+        ![canonical hasPrefix:[root stringByAppendingString:@"/"]]) {
+        if (errorText) *errorText = @"The path is not inside the app backup store.";
+        return NO;
+    }
+    NSString *parentPath = canonical.stringByDeletingLastPathComponent;
+    NSString *grandparentPath = parentPath.stringByDeletingLastPathComponent;
+    if (![parentPath isEqualToString:root] && ![grandparentPath isEqualToString:root]) {
+        if (errorText) *errorText = @"Only a backup bundle or date folder can be deleted.";
+        return NO;
+    }
+    if ([canonical.lastPathComponent hasPrefix:@"."]) {
+        if (errorText) *errorText = @"Hidden backup folders cannot be deleted here.";
+        return NO;
+    }
+    int parent = wq_open_directory_flags(parentPath, O_SEARCH);
+    if (parent < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    const char *name = canonical.lastPathComponent.fileSystemRepresentation;
+    struct stat st;
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errorText) *errorText = wq_errno(errno);
+        close(parent);
+        return NO;
+    }
+    int rc;
+    if (S_ISDIR(st.st_mode)) {
+        unsigned long long ignored = 0;
+        if (!wq_purge_contents_cancellable(canonical, &ignored, nil)) {
+            if (errorText) *errorText = @"Could not remove everything inside the backup.";
+            close(parent);
+            return NO;
+        }
+        rc = unlinkat(parent, name, AT_REMOVEDIR);
+    } else {
+        rc = unlinkat(parent, name, 0);
+    }
+    int err = errno;
+    close(parent);
+    wq_log(@"delete backup: %@ -> %@", path, rc == 0 ? @"OK" : wq_errno(err));
+    if (rc != 0 && errorText) *errorText = wq_errno(err);
+    return rc == 0;
+}
+
 static int wq_open_directory_flags(NSString *path, int flags)
 {
     int fd = WQOpenDirectoryNoLinksFlags(path, flags);

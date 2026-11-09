@@ -72,6 +72,15 @@ int main(void)
             put(appSource, @"source");
             check(!wq_create_file_from([wq_test_app_backup_root stringByAppendingPathComponent:@"copy"], appSource, &error), @"app backup streamed create refused");
             check(!wq_copy_to_local(appSource, [wq_test_app_backup_root stringByAppendingPathComponent:@"export"], &error), @"app backup local copy refused");
+            NSString *backupBundle = [wq_test_app_backup_root stringByAppendingPathComponent:@"com.example.app"];
+            NSString *backupDate = [backupBundle stringByAppendingPathComponent:@"2026-11-09 22.00.00"];
+            check([fm createDirectoryAtPath:backupDate withIntermediateDirectories:YES attributes:nil error:nil], @"create backup date fixture");
+            put([backupDate stringByAppendingPathComponent:@"sentinel"], @"backup");
+            check(!wq_delete_backup(wq_test_app_backup_root, &error), @"backup root cannot be deleted");
+            check(!wq_delete_backup([backupDate stringByAppendingPathComponent:@"sentinel"], &error), @"individual backup files cannot be deleted as a backup");
+            check(wq_delete_backup(backupDate, &error) && ![fm fileExistsAtPath:backupDate], @"explicit backup date deletion succeeds");
+            check([fm createDirectoryAtPath:[backupBundle stringByAppendingPathComponent:@"2026-11-09 22.00.01"] withIntermediateDirectories:YES attributes:nil error:nil], @"create second backup date");
+            check(wq_delete_backup(backupBundle, &error) && ![fm fileExistsAtPath:backupBundle], @"explicit bundle backup deletion succeeds");
 
             NSString *streamSource = [base stringByAppendingPathComponent:@"stream-source"];
             NSString *streamDest = [base stringByAppendingPathComponent:@"stream-dest"];
