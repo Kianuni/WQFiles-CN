@@ -20,6 +20,7 @@
 @end
 
 static char kWQSharePreparationKey;
+static char kWQShareInFlightKey;
 
 static NSString *wq_unique_export_directory(void)
 {
@@ -64,6 +65,18 @@ static void wq_clear_preparation(UIViewController *host, WQSharePreparation *pre
     }
 }
 
+static BOOL wq_share_in_flight(UIViewController *host)
+{
+    return host && (objc_getAssociatedObject(host, &kWQSharePreparationKey) ||
+                    objc_getAssociatedObject(host, &kWQShareInFlightKey));
+}
+
+static void wq_clear_in_flight(UIViewController *host)
+{
+    if (!host) return;
+    objc_setAssociatedObject(host, &kWQShareInFlightKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static BOOL wq_present_share(UIViewController *host, NSString *file, NSString *exportDir, UIView *source)
 {
     if (!wq_share_host_is_active(host)) {
@@ -91,6 +104,7 @@ static BOOL wq_present_share(UIViewController *host, NSString *file, NSString *e
 void wq_share_cancel(UIViewController *host)
 {
     if (!host) return;
+    wq_clear_in_flight(host);
     WQSharePreparation *preparation = objc_getAssociatedObject(host, &kWQSharePreparationKey);
     preparation.cancelled = YES;
     if (host) objc_setAssociatedObject(host, &kWQSharePreparationKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -104,6 +118,12 @@ void wq_share_cancel(UIViewController *host)
 // overwrite one another. The export is removed when the share sheet finishes.
 void wq_share(UIViewController *host, NSString *path, UIView *source)
 {
+    if (!host) return;
+    if (wq_share_in_flight(host)) {
+        wq_alert(host, @"Share in progress", @"Wait for the current share to finish before starting another.");
+        return;
+    }
+    objc_setAssociatedObject(host, &kWQShareInFlightKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak UIViewController *weakHost = host;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
@@ -121,6 +141,7 @@ void wq_share(UIViewController *host, NSString *path, UIView *source)
             UIViewController *strongHost = weakHost;
             if (!ok) {
                 wq_remove_export(outDir);
+                wq_clear_in_flight(strongHost);
                 if (wq_share_host_is_active(strongHost)) {
                     wq_alert(strongHost, @"Cannot share", error ?: @"Could not create a temporary export folder");
                 }
@@ -130,6 +151,7 @@ void wq_share(UIViewController *host, NSString *path, UIView *source)
                 !wq_present_share(strongHost, tmp, outDir, source)) {
                 wq_remove_export(outDir);
             }
+            wq_clear_in_flight(strongHost);
         });
     });
 }
@@ -141,10 +163,19 @@ static NSString *wq_zip_name(NSString *dir);
 void wq_share_folder(UIViewController *host, NSString *dir, NSString *zipName, UIView *source)
 {
     if (!wq_share_host_is_active(host)) return;
+    if (wq_share_in_flight(host)) {
+        wq_alert(host, @"Share in progress", @"Wait for the current share to finish before starting another.");
+        return;
+    }
     WQSharePreparation *preparation = [WQSharePreparation new];
     preparation.host = host;
     UIAlertController *hud = [UIAlertController alertControllerWithTitle:@"Preparing…"
         message:@"Compressing the folder" preferredStyle:UIAlertControllerStyleAlert];
+    [hud addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *__unused action) {
+        preparation.cancelled = YES;
+        objc_setAssociatedObject(host, &kWQSharePreparationKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [host dismissViewControllerAnimated:YES completion:nil];
+    }]];
     preparation.hud = hud;
     objc_setAssociatedObject(host, &kWQSharePreparationKey, preparation, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [host presentViewController:hud animated:YES completion:nil];
