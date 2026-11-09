@@ -392,6 +392,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
             NSError *serializationError = nil;
             NSString *writeError = nil;
             BOOL ok = NO;
+            NSDictionary *savedVersion = nil;
             id snapshot = wqp_immutable_plist_copy(root);
             NSData *data = snapshot ? [NSPropertyListSerialization dataWithPropertyList:snapshot
                                                                                      format:format
@@ -413,16 +414,14 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
                 if (!check) {
                     writeError = validationError.localizedDescription ?: @"The serialized property list could not be validated.";
                 } else {
-                    ok = wq_write_if_unchanged(path, data, expectedVersion, &writeError);
+                    ok = wq_write_if_unchanged_get_version(path, data, expectedVersion, &savedVersion, &writeError);
                 }
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 [doc.edit finishSave:ok revision:savedRevision];
-                // Do not treat a post-write pathname/version sample as the
-                // editor's content: an external writer may win that race.
-                // Reopen before another save so conflict protection remains
-                // fail-closed instead of accepting a nil expected version.
-                if (ok) doc.version = nil;
+                // Returned while the saved bytes were verified on the locked
+                // descriptor; a later external change is rejected next save.
+                if (ok) doc.version = savedVersion;
 
                 WQPlistEditorViewController *origin = weakSelf;
                 UINavigationController *nav = navigationController ?: origin.navigationController;

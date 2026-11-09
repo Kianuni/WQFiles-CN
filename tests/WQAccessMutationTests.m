@@ -138,6 +138,32 @@ int main(void)
             }
             check(!wq_backup_original_path([wq_test_backup_root stringByAppendingPathComponent:@"garbage/private/var/file"]), @"arbitrary stamp cannot supply restore path");
             check(!wq_backup_original_path([wq_test_backup_root stringByAppendingString:@"/20261109-203000-123-1/private/var/../file"]), @"raw traversal restore path rejected");
+
+            NSDictionary *savedVersion = nil;
+            put(file, @"original");
+            check(wq_write_if_unchanged_get_version(file, bytes(@"first"), wq_file_version(file), &savedVersion, &error), @"verified write returns saved descriptor version");
+            check([savedVersion isEqual:wq_file_version(file)] && has(file, @"first"), @"saved write version belongs to verified contents");
+            check(wq_write_if_unchanged_get_version(file, bytes(@"second"), savedVersion, &savedVersion, &error), @"repeat write does not require reopening");
+            check(wq_patch_if_unchanged_get_version(file, @{ @0: bytes(@"S") }, savedVersion, &savedVersion, &error) && has(file, @"Second"), @"verified patch returns reusable version");
+            check(wq_patch_if_unchanged_get_version(file, @{ @1: bytes(@"E") }, savedVersion, &savedVersion, &error) && has(file, @"SEcond"), @"repeat patch does not require reopening");
+            NSDictionary *oldSavedVersion = savedVersion;
+            put(file, @"external later");
+            check(!wq_write_if_unchanged_get_version(file, bytes(@"bad"), oldSavedVersion, &savedVersion, &error) && savedVersion == nil && has(file, @"external later"), @"later external edit rejects old result version");
+            for (NSNumber *patch in @[@NO, @YES]) {
+                put(file, @"original");
+                NSDictionary *snapshot = wq_file_version(file);
+                wq_test_mutation_hook = ^(NSString *stage, NSString *path) {
+                    if ([stage isEqual:@"written"]) {
+                        int fd = open(path.fileSystemRepresentation, O_WRONLY | O_TRUNC);
+                        check(fd >= 0 && WQWriteBytes(fd, bytes(@"external")), @"inject post-write concurrent contents");
+                        close(fd);
+                    }
+                };
+                BOOL ok = patch.boolValue ? wq_patch_if_unchanged_get_version(file, @{ @0: bytes(@"X") }, snapshot, &savedVersion, &error)
+                                         : wq_write_if_unchanged_get_version(file, bytes(@"intended"), snapshot, &savedVersion, &error);
+                check(!ok && savedVersion == nil && has(file, @"external"), @"post-write interference is not adopted or rolled back over");
+                wq_test_mutation_hook = nil;
+            }
         } @finally {
             wq_test_mutation_hook = nil;
             wq_test_backup_root = nil;

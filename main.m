@@ -341,12 +341,11 @@ static const NSUInteger kHexLimit = 64 * 1024;
         [self->_textView resignFirstResponder];
         [self updateEditButton];
         NSString *path = self->_path;
+        NSDictionary *expectedVersion = [self->_version copy];
         dispatch_async(wq_io(), ^{
             NSString *error = nil;
-            BOOL wrote = wq_write_if_unchanged(path, newData, self->_version, &error);
-            NSDictionary *newVersion = wrote ? wq_file_version(path) : nil;
-            BOOL ok = wrote && newVersion != nil;
-            if (wrote && !newVersion) error = @"The file was written, but its new version could not be verified. Reopen it before saving again.";
+            NSDictionary *newVersion = nil;
+            BOOL ok = wq_write_if_unchanged_get_version(path, newData, expectedVersion, &newVersion, &error);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self->_editState finishSave:ok revision:savedRevision];
                 if (ok) self->_version = newVersion;

@@ -43,6 +43,13 @@ NSDictionary<NSString *, NSNumber *> *_Nullable wq_file_version(NSString *path);
 BOOL wq_write(NSString *path, NSData *data, NSString *_Nullable *_Nullable errorText);
 BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary<NSString *, NSNumber *> *_Nullable expected,
                            NSString *_Nullable *_Nullable errorText);
+// Verifies saved bytes against the intended contents while the descriptor stays
+// locked, returning that descriptor's version (never a later pathname sample).
+// The returned snapshot still detects later external changes on the next save.
+BOOL wq_write_if_unchanged_get_version(NSString *path, NSData *data,
+    NSDictionary<NSString *, NSNumber *> *_Nullable expected,
+    NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable savedVersion,
+    NSString *_Nullable *_Nullable errorText);
 
 // Same as wq_write / wq_create_file, but streamed from a local file (for large
 // files; nothing is held in memory). A failed create leaves no partial file.
@@ -64,6 +71,10 @@ NSData *_Nullable wq_read_range(NSString *path, unsigned long long offset, NSUIn
 BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString *_Nullable *_Nullable errorText);
 BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
                            NSDictionary<NSString *, NSNumber *> *_Nullable expected, NSString *_Nullable *_Nullable errorText);
+BOOL wq_patch_if_unchanged_get_version(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
+    NSDictionary<NSString *, NSNumber *> *_Nullable expected,
+    NSDictionary<NSString *, NSNumber *> *_Nullable *_Nullable savedVersion,
+    NSString *_Nullable *_Nullable errorText);
 
 // Creates a new file or folder inside dir.
 BOOL wq_create_file(NSString *path, NSData *data, NSString *_Nullable *_Nullable errorText);
@@ -114,4 +125,3 @@ NSString *wq_backup_root(void);
 NSString *_Nullable wq_backup_original_path(NSString *backupPath);
 
 NS_ASSUME_NONNULL_END
-

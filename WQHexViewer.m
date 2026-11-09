@@ -361,7 +361,8 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
         NSString *path = self->_path;
         dispatch_async(self->_queue, ^{
             NSString *error = nil;
-            BOOL ok = wq_patch_if_unchanged(path, runs, expectedVersion, &error);
+            NSDictionary *savedVersion = nil;
+            BOOL ok = wq_patch_if_unchanged_get_version(path, runs, expectedVersion, &savedVersion, &error);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self->_editState finishSave:ok revision:savedRevision];
                 if (!ok) {
@@ -369,12 +370,8 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
                     wqh_alert(self, @"Save failed", error ?: wq_permission_hint(path, YES) ?: @"Unknown error");
                     return;
                 }
-                // The access layer does not return a descriptor-bound version.
-                // Do not sample the path after writing: another writer could
-                // change it before that sample and make the editor trust it.
-                self->_version = nil;
-                self->_readOnly = YES;
-                self->_status = @"Saved. Reopen to continue editing.";
+                self->_version = savedVersion;
+                self->_status = nil;
                 if (self->_editState.revision == savedRevision) [self->_edits removeAllObjects];
                 [self->_pages removeAllObjects];
                 [self updateBar];

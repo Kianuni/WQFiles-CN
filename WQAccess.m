@@ -473,19 +473,82 @@ static BOOL wq_restore_backup_fd(WQMutation *mutation, NSString *backup, NSStrin
     return ok;
 }
 
-static BOOL wq_mutation_finish(NSString *path, WQMutation *mutation, NSString *backup, BOOL ok,
-                               NSString *failure, NSString **errorText)
+static BOOL wq_pread_exact(int fd, void *buffer, size_t length, off_t offset)
 {
+    size_t done = 0;
+    while (done < length) {
+        ssize_t n = pread(fd, (uint8_t *)buffer + done, length - done, offset + (off_t)done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (n == 0) errno = EIO; return NO; }
+        done += (size_t)n;
+    }
+    return YES;
+}
+
+// Compare a complete intended document, or the complete backup with patches
+// overlaid in write order. Buffers stay bounded even for a very large hex file.
+static NSDictionary *wq_verified_saved_version(WQMutation *mutation, NSString *backup,
+                                               NSData *data, NSDictionary<NSNumber *, NSData *> *runs)
+{
+    struct stat before, after;
+    if (fstat(mutation->fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0) return nil;
+    unsigned long long length = data ? data.length : (unsigned long long)mutation->before.st_size;
+    if ((unsigned long long)before.st_size != length) return nil;
+    int original = data ? -1 : WQOpenRegularAt(AT_FDCWD, backup.fileSystemRepresentation, O_RDONLY, 0);
+    if (!data && original < 0) return nil;
+    NSArray<NSNumber *> *offsets = [runs.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    uint8_t expected[65536], actual[65536];
+    BOOL ok = YES;
+    for (unsigned long long offset = 0; offset < length && ok; ) {
+        size_t count = (size_t)MIN((unsigned long long)sizeof(expected), length - offset);
+        if (data) memcpy(expected, (const uint8_t *)data.bytes + (NSUInteger)offset, count);
+        else {
+            ok = wq_pread_exact(original, expected, count, (off_t)offset);
+            for (NSNumber *key in offsets) {
+                NSData *run = runs[key];
+                unsigned long long start = key.unsignedLongLongValue;
+                unsigned long long end = start + run.length; // ranges validated before mutation
+                unsigned long long first = MAX(offset, start), last = MIN(offset + count, end);
+                if (first < last) memcpy(expected + (size_t)(first - offset),
+                    (const uint8_t *)run.bytes + (NSUInteger)(first - start), (size_t)(last - first));
+            }
+        }
+        ok = ok && wq_pread_exact(mutation->fd, actual, count, (off_t)offset) && memcmp(expected, actual, count) == 0;
+        offset += count;
+    }
+    if (original >= 0) close(original);
+    if (!ok || fstat(mutation->fd, &after) != 0 ||
+        ![wq_version_for_stat(&before) isEqualToDictionary:wq_version_for_stat(&after)]) return nil;
+    return wq_version_for_stat(&after);
+}
+
+static BOOL wq_mutation_finish(NSString *path, WQMutation *mutation, NSString *backup, BOOL ok,
+                               NSString *failure, NSString **errorText, NSDictionary **savedVersion,
+                               NSData *expectedData, NSDictionary<NSNumber *, NSData *> *expectedRuns)
+{
+    if (savedVersion) *savedVersion = nil;
+    NSDictionary *verifiedVersion = nil;
+    BOOL rollbackAllowed = YES;
     if (ok && fsync(mutation->fd) != 0) { ok = NO; failure = wq_errno(errno); }
     WQ_MUTATION_HOOK(@"written", path);
     if (ok && !wq_mutation_current(path, mutation, NO, errorText)) {
         ok = NO; failure = @"The target path was replaced during writing";
     }
+    if (ok && (expectedData || expectedRuns)) {
+        verifiedVersion = wq_verified_saved_version(mutation, backup, expectedData, expectedRuns);
+        if (!verifiedVersion || !wq_mutation_current(path, mutation, NO, errorText)) {
+            ok = NO;
+            rollbackAllowed = NO; // A concurrent writer may own the newer contents.
+            failure = @"Saved contents could not be verified; possible concurrent modification";
+        }
+    }
     if (!ok) {
         NSString *rollbackError = nil;
-        BOOL restored = backup && wq_restore_backup_fd(mutation, backup, &rollbackError);
+        BOOL restored = rollbackAllowed && backup && wq_restore_backup_fd(mutation, backup, &rollbackError);
         if (errorText) *errorText = [NSString stringWithFormat:@"%@; %@. Backup: %@", failure ?: @"Write failed",
-            restored ? @"the original descriptor contents were restored" : [@"rollback failed: " stringByAppendingString:rollbackError ?: @"unknown error"], backup ?: @"none"];
+            restored ? @"the original descriptor contents were restored" :
+            (rollbackAllowed ? [@"rollback failed: " stringByAppendingString:rollbackError ?: @"unknown error"] :
+             @"no rollback was attempted to avoid overwriting concurrent changes"), backup ?: @"none"];
     }
     // Rollback must finish before close releases the lock. A close failure has
     // no safe reopen/rollback path; retain the durable backup and report it.
@@ -495,6 +558,7 @@ static BOOL wq_mutation_finish(NSString *path, WQMutation *mutation, NSString *b
     }
     mutation->fd = -1;
     wq_mutation_close(mutation);
+    if (ok && savedVersion) *savedVersion = verifiedVersion;
     return ok;
 }
 
@@ -584,15 +648,28 @@ static BOOL wq_finish_fd(int fd, BOOL ok, int *err)
     return ok;
 }
 
-BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary<NSString *, NSNumber *> *expected, NSString **errorText)
+static BOOL wq_write_checked(NSString *path, NSData *data, NSDictionary *expected,
+                             NSDictionary **savedVersion, BOOL verify, NSString **errorText)
 {
+    if (savedVersion) *savedVersion = nil;
     WQMutation mutation;
     if (!wq_mutation_open(path, expected, &mutation, O_RDWR, errorText)) return NO;
     NSString *backup = nil;
     if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { wq_mutation_close(&mutation); return NO; }
     BOOL ok = lseek(mutation.fd, 0, SEEK_SET) >= 0 && ftruncate(mutation.fd, 0) == 0 && wq_write_all(mutation.fd, data);
     NSString *failure = ok ? nil : wq_errno(errno);
-    return wq_mutation_finish(path, &mutation, backup, ok, failure, errorText);
+    return wq_mutation_finish(path, &mutation, backup, ok, failure, errorText, savedVersion, verify ? data : nil, nil);
+}
+
+BOOL wq_write_if_unchanged_get_version(NSString *path, NSData *data, NSDictionary *expected,
+                                      NSDictionary **savedVersion, NSString **errorText)
+{
+    return wq_write_checked(path, data, expected, savedVersion, YES, errorText);
+}
+
+BOOL wq_write_if_unchanged(NSString *path, NSData *data, NSDictionary *expected, NSString **errorText)
+{
+    return wq_write_checked(path, data, expected, nil, NO, errorText);
 }
 
 BOOL wq_write(NSString *path, NSData *data, NSString **errorText)
@@ -617,7 +694,7 @@ BOOL wq_write_from_file(NSString *path, NSString *source, NSString **errorText)
     BOOL ok = lseek(mutation.fd, 0, SEEK_SET) >= 0 && ftruncate(mutation.fd, 0) == 0 && wq_stream(in, mutation.fd, &error);
     if (!ok && !error) error = wq_errno(errno);
     close(in);
-    return wq_mutation_finish(path, &mutation, backup, ok, error, errorText);
+    return wq_mutation_finish(path, &mutation, backup, ok, error, errorText, nil, nil, nil);
 }
 
 BOOL wq_create_file_from(NSString *path, NSString *source, NSString **errorText)
@@ -715,9 +792,10 @@ NSData *wq_read_range(NSString *path, unsigned long long offset, NSUInteger leng
     return data;
 }
 
-BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
-                           NSDictionary<NSString *, NSNumber *> *expected, NSString **errorText)
+static BOOL wq_patch_checked(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
+                             NSDictionary *expected, NSDictionary **savedVersion, BOOL verify, NSString **errorText)
 {
+    if (savedVersion) *savedVersion = nil;
     WQMutation mutation;
     if (!wq_mutation_open(path, expected, &mutation, O_RDWR, errorText)) return NO;
     unsigned long long size = (unsigned long long)mutation.before.st_size;
@@ -741,7 +819,20 @@ BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *r
         }
         if (!ok) break;
     }
-    return wq_mutation_finish(path, &mutation, backup, ok, ok ? nil : wq_errno(err), errorText);
+    return wq_mutation_finish(path, &mutation, backup, ok, ok ? nil : wq_errno(err), errorText,
+                              savedVersion, nil, verify ? runs : nil);
+}
+
+BOOL wq_patch_if_unchanged_get_version(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
+                                      NSDictionary *expected, NSDictionary **savedVersion, NSString **errorText)
+{
+    return wq_patch_checked(path, runs, expected, savedVersion, YES, errorText);
+}
+
+BOOL wq_patch_if_unchanged(NSString *path, NSDictionary<NSNumber *, NSData *> *runs,
+                           NSDictionary *expected, NSString **errorText)
+{
+    return wq_patch_checked(path, runs, expected, nil, NO, errorText);
 }
 
 BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString **errorText)
