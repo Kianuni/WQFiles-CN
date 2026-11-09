@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 MINIMUM_IOS_VERSION=27.0
-FINAL_IPA=${WQFILES_FINAL_IPA:-../WQFiles.ipa}
+FINAL_IPA=${WQFILES_FINAL_IPA:-WQFiles.ipa}
 if [[ "$FINAL_IPA" != /* ]]; then
     FINAL_IPA="$ROOT/$FINAL_IPA"
 fi
@@ -50,7 +50,7 @@ trap cleanup EXIT
 APP="$OUT/Payload/WQFiles.app"
 mkdir -p "$APP"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-xcrun --sdk iphoneos clang -fobjc-arc -fmodules -arch arm64 \
+xcrun --sdk iphoneos clang -fobjc-arc -fmodules -fmodules-cache-path="$OUT/ModuleCache" -arch arm64 \
     -miphoneos-version-min="$MINIMUM_IOS_VERSION" \
     -isysroot "$SDK" -Wall -Wextra -Werror -O2 \
     -framework UIKit -framework Foundation -framework Security -framework UniformTypeIdentifiers \

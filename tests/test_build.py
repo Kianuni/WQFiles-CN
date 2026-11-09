@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import stat
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -98,6 +99,25 @@ class StagedBuildTests(unittest.TestCase):
         environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
         environment["FAKE_SDK"] = str(fake_sdk)
         return environment
+
+    def test_default_output_stays_in_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            for name in ("build.sh", "Info.plist", "entitlements.plist"):
+                shutil.copy2(ROOT / name, project / name)
+            (project / "icons").mkdir()
+            (project / "icons" / "AppIcon60x60@2x.png").write_bytes(b"fixture icon")
+            environment = self._fake_environment(root)
+            environment.pop("WQFILES_FINAL_IPA", None)
+            result = subprocess.run(
+                [str(project / "build.sh")], cwd=project, env=environment,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((project / "WQFiles.ipa").is_file())
+            self.assertFalse((root / "WQFiles.ipa").exists())
 
     def test_success_publishes_only_a_validated_zip(self):
         with tempfile.TemporaryDirectory() as directory:
