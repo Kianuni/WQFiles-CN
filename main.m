@@ -503,6 +503,7 @@ static NSString *wq_folder_date_text(NSDate *date)
     NSString *_error;
     BOOL _labels;
     BOOL _backupManager;
+    BOOL _backupStorage;
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
     BOOL _scanInFlight;
@@ -519,8 +520,11 @@ static NSString *wq_folder_date_text(NSDate *date)
         NSString *parent = path.lastPathComponent;
         _labels = [@[@"Application", @"AppGroup", @"PluginKitPlugin", @"InternalDaemon", @"System"] containsObject:parent];
         NSString *appBackups = wq_app_backup_root();
+        NSString *fileBackups = wq_backup_root();
         _backupManager = appBackups.length &&
             ([_path isEqualToString:appBackups] || [_path hasPrefix:[appBackups stringByAppendingString:@"/"]]);
+        _backupStorage = _backupManager ||
+            (fileBackups.length && ([_path isEqualToString:fileBackups] || [_path hasPrefix:[fileBackups stringByAppendingString:@"/"]]));
     }
     return self;
 }
@@ -533,7 +537,7 @@ static NSString *wq_folder_date_text(NSDate *date)
     __weak typeof(self) weakSelf = self;
     NSString *path = _path;
     NSMutableArray<UIMenuElement *> *menuItems = [NSMutableArray new];
-    if (!self.readOnly && !_backupManager) {
+    if (!self.readOnly && !_backupStorage) {
         [menuItems addObject:[UIAction actionWithTitle:@"New Folder" image:[UIImage systemImageNamed:@"folder.badge.plus"] identifier:nil
                           handler:^(UIAction *__unused a) { [weakSelf promptNewFolder]; }]];
         [menuItems addObject:[UIAction actionWithTitle:@"Import File" image:[UIImage systemImageNamed:@"square.and.arrow.down"] identifier:nil
@@ -946,7 +950,7 @@ static NSString *wq_folder_date_text(NSDate *date)
                 [actions addObject:remove];
             }
         }
-        if (!strongSelf.readOnly && !strongSelf->_backupManager) {
+        if (!strongSelf.readOnly && !strongSelf->_backupStorage) {
             [actions addObject:[UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"]
                                               identifier:nil handler:^(UIAction *__unused a) { WQItem *latest = currentItem(); if (latest) [weakSelf promptRename:latest]; }]];
             UIAction *del = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"]
