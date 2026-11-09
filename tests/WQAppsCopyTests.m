@@ -65,6 +65,13 @@ int main(void)
             NSString *changedShape = WQAppsSupportTreeSignature(src, NO, &exists, &error);
             WQCheck(![changedShape isEqualToString:destinationShape]);
 
+            // Content hashing detects a same-size byte change that the shape hash cannot.
+            NSString *contentBefore = WQAppsSupportTreeContentSignature(dst, &exists, &error);
+            WQCheck(contentBefore && exists);
+            Put([dst stringByAppendingPathComponent:@"file"], @"ORIGINAL BYTES");
+            NSString *contentAfter = WQAppsSupportTreeContentSignature(dst, &exists, &error);
+            WQCheck(contentAfter && ![contentAfter isEqualToString:contentBefore]);
+
             // A copy failure must not leave a published destination.
             NSString *missing = [base stringByAppendingPathComponent:@"missing"];
             WQCheck(!wq_copy_contents(missing, [base stringByAppendingPathComponent:@"never"], &error));

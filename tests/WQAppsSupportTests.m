@@ -70,6 +70,19 @@ static void TestManifestTypes(void)
     NSMutableDictionary *typedComplete = [WQBaseManifest() mutableCopy];
     typedComplete[@"Complete"] = @1;
     WQCheck(!WQAppsSupportManifestFields(typedComplete, @"com.example.app", NULL, &error));
+
+    NSMutableDictionary *hashes = [WQBaseManifest() mutableCopy];
+    hashes[@"PartHashes"] = @{ @"Documents": @"aa", @"Library": @"bb" };
+    WQCheck(WQAppsSupportManifestFields(hashes, @"com.example.app", NULL, &error));
+    NSMutableDictionary *missingHash = [hashes mutableCopy];
+    missingHash[@"PartHashes"] = @{ @"Documents": @"aa" };
+    WQCheck(!WQAppsSupportManifestFields(missingHash, @"com.example.app", NULL, &error));
+    NSMutableDictionary *extraHash = [hashes mutableCopy];
+    extraHash[@"PartHashes"] = @{ @"Documents": @"aa", @"Library": @"bb", @"tmp": @"cc" };
+    WQCheck(!WQAppsSupportManifestFields(extraHash, @"com.example.app", NULL, &error));
+    NSMutableDictionary *badHash = [hashes mutableCopy];
+    badHash[@"PartHashes"] = @{ @"Documents": @1, @"Library": @"bb" };
+    WQCheck(!WQAppsSupportManifestFields(badHash, @"com.example.app", NULL, &error));
 }
 
 static void TestNumericOrdering(void)

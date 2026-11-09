@@ -313,6 +313,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
     }
     NSMutableArray *parts = [NSMutableArray new];
     NSMutableDictionary<NSString *, NSString *> *sourceStates = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, NSString *> *partHashes = [NSMutableDictionary new];
     BOOL ok = YES;
     for (NSString *part in kAppBackupParts()) {
         NSString *src = [container stringByAppendingPathComponent:part];
@@ -323,7 +324,16 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
         NSString *sourceState = WQAppsSupportTreeSignature(src, YES, &sourceExists, error);
         if (!sourceState) { ok = NO; break; }
         sourceStates[part] = sourceState;
-        if (!wq_copy_part_and_verify(src, [staging stringByAppendingPathComponent:part], error)) { ok = NO; break; }
+        NSString *stagedPart = [staging stringByAppendingPathComponent:part];
+        if (!wq_copy_part_and_verify(src, stagedPart, error)) { ok = NO; break; }
+        BOOL stagedExists = NO;
+        NSString *contentHash = WQAppsSupportTreeContentSignature(stagedPart, &stagedExists, error);
+        if (!contentHash || !stagedExists) {
+            ok = NO;
+            if (error && !*error) *error = @"Cannot hash the staged backup part";
+            break;
+        }
+        partHashes[part] = contentHash;
         [parts addObject:part];
     }
     if (ok) {
@@ -351,7 +361,8 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
         final = [root stringByAppendingPathComponent:[NSString stringWithFormat:@"%@ (%lu)", stamp, (unsigned long)n]];
     }
     NSDictionary *manifest = @{ @"Complete": @YES, @"BundleID": bundleID, @"Created": created,
-                                @"Parts": parts, @"Reason": reason ?: @"", @"Format": @1,
+                                @"Parts": parts, @"PartHashes": partHashes,
+                                @"Reason": reason ?: @"", @"Format": @1,
                                 @"Sequence": @(sequence) };
     if (ok && ![manifest writeToFile:[staging stringByAppendingPathComponent:kBackupManifest] atomically:YES]) {
         ok = NO;
@@ -892,17 +903,42 @@ static BOOL wq_finish_restore_journal(NSString **error)
     return wq_remove_restore_journal(error);
 }
 
+static BOOL wq_validate_backup_hashes(NSString *backup, NSArray<NSString *> *parts,
+                                      NSDictionary *manifest, NSString **error)
+{
+    NSDictionary *hashes = manifest[@"PartHashes"];
+    if (!hashes) return YES;   // backups made before content hashes existed
+    for (NSString *part in parts) {
+        NSString *expected = hashes[part];
+        if (![expected isKindOfClass:NSString.class] || !expected.length) {
+            if (error) *error = [NSString stringWithFormat:@"The backup has no hash for %@", part];
+            return NO;
+        }
+        BOOL exists = NO;
+        NSString *actual = WQAppsSupportTreeContentSignature([backup stringByAppendingPathComponent:part],
+                                                              &exists, error);
+        if (!actual || !exists || ![actual isEqualToString:expected]) {
+            if (error) *error = [NSString stringWithFormat:@"The backup's %@ contents changed after it was created", part];
+            return NO;
+        }
+    }
+    return YES;
+}
+
 static BOOL wq_rollback_safety(NSString *container, NSString *bundleID, NSString *safety,
                                dev_t expectedDevice, ino_t expectedInode, NSString **error)
 {
     NSArray<NSString *> *parts = nil;
+    NSDictionary *safetyManifest = nil;
     if (!wq_validate_container(container, bundleID, expectedDevice, expectedInode, error) ||
-        !wq_validate_backup(safety, bundleID, NO, &parts, NULL, NULL, error)) return NO;
+        !wq_validate_backup(safety, bundleID, NO, &parts, &safetyManifest, NULL, error) ||
+        !wq_validate_backup_hashes(safety, parts, safetyManifest, error)) return NO;
     // Revalidate everything immediately before the first mutation. In
     // particular, a missing named safety part is never interpreted as an
     // instruction to purge the live part.
     if (!wq_validate_container(container, bundleID, expectedDevice, expectedInode, error) ||
-        !wq_validate_backup(safety, bundleID, NO, &parts, NULL, NULL, error)) return NO;
+        !wq_validate_backup(safety, bundleID, NO, &parts, &safetyManifest, NULL, error) ||
+        !wq_validate_backup_hashes(safety, parts, safetyManifest, error)) return NO;
     BOOL ok = YES;
     for (NSString *part in kAppBackupParts()) {
         NSString *saved = [safety stringByAppendingPathComponent:part];
@@ -1030,9 +1066,11 @@ NSString *wq_recover_interrupted_restore(void)
     // journal/safety material.
     error = nil;
     NSArray<NSString *> *preRestoreParts = nil;
+    NSDictionary *preRestoreManifest = nil;
     if (!wq_validate_container(app.container, app.bundleID, app.containerDevice, app.containerInode, &error) ||
-        !wq_validate_backup(backup, app.bundleID, YES, &preRestoreParts, NULL, NULL, &error) ||
-        ![preRestoreParts isEqualToArray:parts]) {
+        !wq_validate_backup(backup, app.bundleID, YES, &preRestoreParts, &preRestoreManifest, NULL, &error) ||
+        ![preRestoreParts isEqualToArray:parts] ||
+        !wq_validate_backup_hashes(backup, preRestoreParts, preRestoreManifest, &error)) {
         error = error ?: @"The selected backup changed before restore";
     }
     BOOL ok = error == nil;

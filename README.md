@@ -60,7 +60,8 @@ folders can be deleted; symbolic links are removed as links. Clearing an app's
 data and cleaning caches delete without a file-by-file backup; Apps offers to
 back up Documents and Library first, while `tmp` is discarded and cannot be
 restored. Close the target app before backup, restore, or clear. App copies are
-verified by a source-stability digest and a destination-shape digest, and purge
+verified by a source-stability digest, a destination-shape digest and stored
+part content hashes (rechecked before restore and rollback), and purge
 postconditions are rechecked, but the operations are not filesystem snapshots
 if the target app keeps running. Target data is changed only in response to
 explicit actions; interrupted safety transactions may be recovered on startup.
