@@ -12,6 +12,16 @@ class ReleasePolicyTests(unittest.TestCase):
             info = plistlib.load(plist_file)
         self.assertEqual(info["MinimumOSVersion"], "27.0")
 
+    def test_ipad_declares_all_orientations(self):
+        with (ROOT / "Info.plist").open("rb") as plist_file:
+            info = plistlib.load(plist_file)
+        self.assertEqual(set(info["UISupportedInterfaceOrientations~ipad"]), {
+            "UIInterfaceOrientationPortrait",
+            "UIInterfaceOrientationPortraitUpsideDown",
+            "UIInterfaceOrientationLandscapeLeft",
+            "UIInterfaceOrientationLandscapeRight",
+        })
+
     def test_signing_requests_app_group_but_not_signer_owned_identifier(self):
         with (ROOT / "entitlements.plist").open("rb") as plist_file:
             entitlements = plistlib.load(plist_file)
