@@ -77,7 +77,7 @@ static inline BOOL WQPlistIsKeyedArchiveUID(id value)
 // Immutable, serializable copy of the editor's mutable document. Keyed-archive
 // UID leaves are immutable and are passed through unchanged; unsupported
 // objects fail the copy instead of reaching NSPropertyListSerialization.
-static inline id WQPlistImmutableCopy(id value, NSString *_Nullable *_Nullable errorOut)
+static inline id _Nullable WQPlistImmutableCopy(id value, NSString *_Nullable *_Nullable errorOut)
 {
     if (!value) {
         if (errorOut) *errorOut = @"The property list contains a nil value.";
