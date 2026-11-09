@@ -20,6 +20,7 @@
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic) unsigned long long bytes;
+@property (nonatomic) BOOL sizeKnown;
 @property (nonatomic) BOOL hasAccess;
 @property (nonatomic) BOOL hasIdentity;
 @property (nonatomic) dev_t containerDevice;
@@ -363,29 +364,17 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
 }
 
 static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellation,
-                                     unsigned long long *sizeOut)
+                                     unsigned long long *sizeOut, BOOL *completeOut)
 {
-    struct stat st;
-    if (!wq_stat(dir, &st)) {
-        if (sizeOut) *sizeOut = 0;
-        return YES;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        if (sizeOut) *sizeOut = (unsigned long long)st.st_size;
-        return YES;
-    }
-    if (![NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) {
-        wq_grant(dir);
-    }
+    if (completeOut) *completeOut = NO;
+    if (sizeOut) *sizeOut = 0;
+    if (cancellation.isCancelled) return NO;
     unsigned long long total = 0;
-    NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:dir];
-    for (NSString *__unused relative in enumerator) {
-        if (cancellation.isCancelled) return NO;
-        NSDictionary *attributes = enumerator.fileAttributes;
-        if ([attributes.fileType isEqualToString:NSFileTypeRegular]) total += attributes.fileSize;
-    }
+    WQMeasureResult result = wq_measure_tree(dir, cancellation, &total);
+    if (result == WQMeasureResultCancelled) return NO;
     if (sizeOut) *sizeOut = total;
-    return !cancellation.isCancelled;
+    if (completeOut) *completeOut = result != WQMeasureResultLimited;
+    return YES;
 }
 
 - (void)viewDidLoad
@@ -443,7 +432,7 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
                 });
             });
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
-        NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0;
+        NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0, sizeLimited = 0;
         for (NSString *c in containers) {
             if (cancellation.isCancelled) return;
             i++;
@@ -476,9 +465,13 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
             app.name = bid.length ? (wq_display_name(bid) ?: bid)
                                   : [NSString stringWithFormat:@"Unknown container (%@)", c.lastPathComponent];
             app.bytes = 0;
+            app.sizeKnown = NO;
             unsigned long long appSize = 0;
-            if (granted && hasIdentity && !wq_dir_size_cancellable(c, cancellation, &appSize)) return;
+            BOOL sizeKnown = NO;
+            if (granted && hasIdentity && !wq_dir_size_cancellable(c, cancellation, &appSize, &sizeKnown)) return;
             app.bytes = appSize;
+            app.sizeKnown = sizeKnown;
+            if (granted && hasIdentity && !sizeKnown) sizeLimited++;
             app.backups = bid.length ? wq_app_backups(bid) : @[];
             [apps addObject:app];
         }
@@ -489,8 +482,8 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
         NSString *note = nil;
         if (!containers) note = @"Container enumeration failed. Check the App Group and see Log.";
         else if (!containers.count) note = @"No app containers were found. Check the App Group and see Log.";
-        else if (limited) note = [NSString stringWithFormat:@"%lu containers · %lu with limited access, identity, or no identifier. See Log.",
-                                  (unsigned long)apps.count, (unsigned long)limited];
+        else if (limited || sizeLimited) note = [NSString stringWithFormat:@"%lu containers · %lu with limited access, identity, size, or no identifier. See Log.",
+                                                 (unsigned long)apps.count, (unsigned long)(limited + sizeLimited)];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != self->_scanGeneration || cancellation.isCancelled) return;
             self->_scanning = NO;
@@ -557,6 +550,8 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
         c.secondaryText = [NSString stringWithFormat:@"%@ · %@ · no identifier", wq_size_text(app.bytes), identifier];
     } else if (!app.hasIdentity) {
         c.secondaryText = [NSString stringWithFormat:@"%@ · %@ · container identity unavailable", wq_size_text(app.bytes), app.bundleID];
+    } else if (!app.sizeKnown) {
+        c.secondaryText = [NSString stringWithFormat:@"size unavailable · %@%@", app.bundleID, hasBackup ? @" · backed up" : @""];
     } else {
         c.secondaryText = [NSString stringWithFormat:@"%@ · %@%@", wq_size_text(app.bytes), app.bundleID, hasBackup ? @" · backed up" : @""];
     }
@@ -598,7 +593,8 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
         return;
     }
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:app.name
-        message:[NSString stringWithFormat:@"%@\n%@ of data", app.bundleID, wq_size_text(app.bytes)]
+        message:[NSString stringWithFormat:@"%@\n%@", app.bundleID,
+                 app.sizeKnown ? [NSString stringWithFormat:@"%@ of data", wq_size_text(app.bytes)] : @"size unavailable"]
         preferredStyle:UIAlertControllerStyleActionSheet];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Back Up Data" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         [self backUp:app then:nil];

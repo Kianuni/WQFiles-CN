@@ -1117,21 +1117,59 @@ BOOL wq_stat(NSString *path, struct stat *st)
     return NO;
 }
 
+WQMeasureResult wq_measure_tree(NSString *dir, WQScanCancellation *cancellation, unsigned long long *bytes)
+{
+    if (cancellation.isCancelled) return WQMeasureResultCancelled;
+    struct stat st = {0};
+    if (!wq_stat(dir, &st)) {
+        struct stat direct = {0};
+        if (lstat(dir.fileSystemRepresentation, &direct) != 0 &&
+            (errno == ENOENT || errno == ENOTDIR)) return WQMeasureResultMissing;
+        return WQMeasureResultLimited;
+    }
+    if (!S_ISDIR(st.st_mode)) return WQMeasureResultLimited;
+    if (![NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) wq_grant(dir);
+
+    NSURL *root = [NSURL fileURLWithPath:dir isDirectory:YES];
+    NSArray<NSURLResourceKey> *keys = @[NSURLIsRegularFileKey, NSURLIsSymbolicLinkKey,
+                                       NSURLFileSizeKey, NSURLIsDirectoryKey];
+    __block BOOL limited = NO;
+    NSDirectoryEnumerator<NSURL *> *enumerator = [NSFileManager.defaultManager
+        enumeratorAtURL:root includingPropertiesForKeys:keys options:0
+           errorHandler:^BOOL(NSURL *errorURL, NSError *error) {
+        limited = YES;
+        wq_log(@"measure: cannot enumerate %@ (%@)", errorURL.path, error.localizedDescription ?: @"unknown error");
+        return YES;
+    }];
+    if (!enumerator) return WQMeasureResultLimited;
+
+    unsigned long long total = 0;
+    for (NSURL *item in enumerator) {
+        if (cancellation.isCancelled) return WQMeasureResultCancelled;
+        NSNumber *isLink = nil, *isRegular = nil, *size = nil;
+        NSError *error = nil;
+        if (![item getResourceValue:&isLink forKey:NSURLIsSymbolicLinkKey error:&error] ||
+            ![item getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:&error]) {
+            limited = YES;
+            continue;
+        }
+        if (isLink.boolValue || !isRegular.boolValue) continue;
+        if (![item getResourceValue:&size forKey:NSURLFileSizeKey error:&error]) {
+            limited = YES;
+            continue;
+        }
+        total += size.unsignedLongLongValue;
+    }
+    if (cancellation.isCancelled) return WQMeasureResultCancelled;
+    if (bytes) *bytes = total;
+    return limited ? WQMeasureResultLimited : WQMeasureResultKnown;
+}
+
 unsigned long long wq_dir_size(NSString *dir)
 {
-    struct stat st;
-    if (!wq_stat(dir, &st)) return 0;
-    if (!S_ISDIR(st.st_mode)) return (unsigned long long)st.st_size;
-    // Ask for a token only when the folder can't already be read (a grant on
-    // the container covers its subfolders).
-    if (![NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) wq_grant(dir);
-    unsigned long long total = 0;
-    NSDirectoryEnumerator *en = [NSFileManager.defaultManager enumeratorAtPath:dir];
-    for (NSString *__unused rel in en) {
-        NSDictionary *attrs = en.fileAttributes;
-        if ([attrs.fileType isEqualToString:NSFileTypeRegular]) total += attrs.fileSize;
-    }
-    return total;
+    unsigned long long bytes = 0;
+    WQMeasureResult result = wq_measure_tree(dir, nil, &bytes);
+    return result == WQMeasureResultMissing ? 0 : bytes;
 }
 
 static BOOL wq_directory_current(NSString *path, int fd)

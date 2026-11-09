@@ -118,49 +118,21 @@ static WQCacheMeasurementState WQCacheMeasureDirectory(NSString *path,
                                                         WQScanCancellation *cancellation,
                                                         unsigned long long *bytes)
 {
-    if (cancellation.isCancelled) return WQCacheMeasurementCancelled;
-    struct stat st = {0};
-    if (!wq_stat(path, &st)) {
-        struct stat direct = {0};
-        if (lstat(path.fileSystemRepresentation, &direct) != 0 &&
-            (errno == ENOENT || errno == ENOTDIR)) return WQCacheMeasurementMissing;
-        return WQCacheMeasurementLimited;
-    }
-    if (!S_ISDIR(st.st_mode)) return WQCacheMeasurementLimited;
-
-    // wq_list performs the access retry and, unlike wq_dir_size, exposes a
-    // failed root listing.  The enumerator below then measures the tree once
-    // while retaining cancellation checks between entries.
-    NSString *listError = nil;
-    NSArray<NSString *> *children = wq_list(path, &listError);
-    if (!children) {
-        wq_log(@"cache scan: cannot list %@%@", path,
-               listError.length ? [NSString stringWithFormat:@" (%@)", listError] : @"");
-        return WQCacheMeasurementLimited;
-    }
-    if (!children.count) {
-        if (bytes) *bytes = 0;
-        return WQCacheMeasurementKnown;
-    }
-
-    NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:path];
-    if (!enumerator) {
-        wq_log(@"cache scan: cannot enumerate %@", path);
-        return WQCacheMeasurementLimited;
-    }
     unsigned long long total = 0;
-    for (NSString *__unused relativePath in enumerator) {
-        if (cancellation.isCancelled) return WQCacheMeasurementCancelled;
-        NSDictionary *attributes = enumerator.fileAttributes;
-        if (!attributes) {
-            wq_log(@"cache scan: missing attributes while enumerating %@", path);
+    WQMeasureResult result = wq_measure_tree(path, cancellation, &total);
+    switch (result) {
+        case WQMeasureResultMissing:
+            return WQCacheMeasurementMissing;
+        case WQMeasureResultKnown:
+            if (bytes) *bytes = total;
+            return WQCacheMeasurementKnown;
+        case WQMeasureResultCancelled:
+            return WQCacheMeasurementCancelled;
+        case WQMeasureResultLimited:
+            wq_log(@"cache scan: limited tree measurement for %@", path);
             return WQCacheMeasurementLimited;
-        }
-        if ([attributes.fileType isEqualToString:NSFileTypeRegular]) total += attributes.fileSize;
     }
-    if (cancellation.isCancelled) return WQCacheMeasurementCancelled;
-    if (bytes) *bytes = total;
-    return WQCacheMeasurementKnown;
+    return WQCacheMeasurementLimited;
 }
 
 typedef NS_ENUM(NSInteger, WQCachePathState) {

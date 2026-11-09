@@ -104,8 +104,18 @@ NSArray<NSString *> *_Nullable wq_enumerate(NSString *dir, int64_t maxInode,
                                             WQScanCancellation *_Nullable cancellation,
                                             void (^_Nullable progress)(int64_t done, int64_t total, NSUInteger found));
 
-// Total byte size of a directory tree (grants access as needed). 0 if missing.
-unsigned long long wq_dir_size(NSString *dir);
+typedef NS_ENUM(NSInteger, WQMeasureResult) {
+    WQMeasureResultMissing,
+    WQMeasureResultKnown,
+    WQMeasureResultLimited,
+    WQMeasureResultCancelled,
+};
+
+// Total byte size of regular files below dir. A missing directory is Missing
+// (size 0); an unreadable subtree makes the result Limited instead of silently
+// undercounting. Grants access when the root cannot be listed.
+WQMeasureResult wq_measure_tree(NSString *dir, WQScanCancellation *_Nullable cancellation,
+                                unsigned long long *_Nullable bytes);
 
 // Deletes every item *inside* dir (dir itself stays). No backup — for caches.
 // Adds freed bytes to *freed. A missing dir counts as done; NO if dir cannot
