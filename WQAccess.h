@@ -122,6 +122,9 @@ WQMeasureResult wq_measure_tree(NSString *dir, WQScanCancellation *_Nullable can
 // be read or listed, ancestry contains links (except canonical /var), the target
 // changes, or some items could not be removed. Child links are not followed.
 BOOL wq_purge_contents(NSString *dir, unsigned long long *freed);
+// Cancellable variant for long cache cleans; returns NO when cancelled.
+BOOL wq_purge_contents_cancellable(NSString *dir, unsigned long long *freed,
+                                   WQScanCancellation *_Nullable cancellation);
 
 // Copies every item inside srcDir into dstDir (replacing same-named items).
 // Each child is staged/flushed before installation; old children survive failed

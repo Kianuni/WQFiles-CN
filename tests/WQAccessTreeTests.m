@@ -75,6 +75,15 @@ int main(void)
             check(symlink(sentinel.fileSystemRepresentation, linkDest.fileSystemRepresentation) == 0, @"create rename symlink destination");
             check(!wq_rename(src, linkDest.lastPathComponent, &error) && has(sentinel, @"outside"), @"rename preserves existing symlink destination");
             check(!wq_rename(src, @"..", &error) && !wq_rename(src, @".", &error), @"rename rejects special names");
+            NSString *cancelDir = [base stringByAppendingPathComponent:@"cancel-cache"];
+            mkdirs(cancelDir);
+            NSString *cancelSentinel = [cancelDir stringByAppendingPathComponent:@"sentinel"];
+            put(cancelSentinel, @"keep");
+            WQScanCancellation *cancellation = [WQScanCancellation new];
+            [cancellation cancel];
+            freed = 0;
+            check(!wq_purge_contents_cancellable(cancelDir, &freed, cancellation) && has(cancelSentinel, @"keep"),
+                  @"cancelled purge leaves the tree intact");
             for (NSUInteger i = 0; i < 32; i++) {
                 NSString *raceSrc = [base stringByAppendingPathComponent:[NSString stringWithFormat:@"src-%lu", (unsigned long)i]];
                 NSString *raceDst = [base stringByAppendingPathComponent:[NSString stringWithFormat:@"dst-%lu", (unsigned long)i]];

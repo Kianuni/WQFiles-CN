@@ -1313,7 +1313,8 @@ static BOOL wq_directory_current(NSString *path, int fd)
     return ok;
 }
 
-static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned long long *freed);
+static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned long long *freed,
+                            WQScanCancellation *cancellation);
 
 // Purge uses fd-relative removal, so the path is only a swap detector. One
 // lstat is enough; reopening every ancestor for every child is needlessly
@@ -1325,7 +1326,7 @@ static BOOL wq_purge_root_matches(NSString *path, int fd)
            fstat(fd, &fdStat) == 0 && WQSameObject(&pathStat, &fdStat);
 }
 
-static BOOL wq_purge_fd(int fd, NSString *path, unsigned long long *freed)
+static BOOL wq_purge_fd(int fd, NSString *path, unsigned long long *freed, WQScanCancellation *cancellation)
 {
     int listing = dup(fd);
     if (listing < 0) return NO;
@@ -1333,6 +1334,7 @@ static BOOL wq_purge_fd(int fd, NSString *path, unsigned long long *freed)
     if (!dir) { close(listing); return NO; }
     BOOL ok = YES;
     for (;;) {
+        if (cancellation.isCancelled) { ok = NO; break; }
         errno = 0;
         struct dirent *entry = readdir(dir);
         if (!entry) { if (errno) ok = NO; break; }
@@ -1343,14 +1345,16 @@ static BOOL wq_purge_fd(int fd, NSString *path, unsigned long long *freed)
         // Fail closed on changed ancestry; all removal remains fd-relative even
         // in the final race window. Symlink children are unlinked, never followed.
         if (!wq_purge_root_matches(path, fd)) { ok = NO; break; }
-        if (!wq_remove_entry(fd, name, [path stringByAppendingPathComponent:name], freed)) ok = NO;
+        if (!wq_remove_entry(fd, name, [path stringByAppendingPathComponent:name], freed, cancellation)) ok = NO;
     }
     if (closedir(dir) != 0) ok = NO;
     return ok;
 }
 
-static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned long long *freed)
+static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned long long *freed,
+                            WQScanCancellation *cancellation)
 {
+    if (cancellation.isCancelled) return NO;
     const char *item = name.fileSystemRepresentation;
     struct stat before, current;
     if (fstatat(parent, item, &before, AT_SYMLINK_NOFOLLOW) != 0) return errno == ENOENT;
@@ -1361,7 +1365,7 @@ static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned
             child = openat(parent, item, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (child < 0) return NO;
         BOOL ok = fstat(child, &current) == 0 && WQSameObject(&before, &current) &&
-            wq_purge_root_matches(path, child) && wq_purge_fd(child, path, freed);
+            wq_purge_root_matches(path, child) && wq_purge_fd(child, path, freed, cancellation);
         close(child);
         if (!ok) return NO;
     }
@@ -1377,8 +1381,9 @@ static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned
     return rc == 0;
 }
 
-BOOL wq_purge_contents(NSString *dir, unsigned long long *freed)
+BOOL wq_purge_contents_cancellable(NSString *dir, unsigned long long *freed, WQScanCancellation *cancellation)
 {
+    if (cancellation.isCancelled) return NO;
     if (!WQAbsolutePathGrammar(WQCanonicalVarPath(dir))) return NO;
     int fd = wq_open_directory(dir);
     if (fd < 0) {
@@ -1386,9 +1391,14 @@ BOOL wq_purge_contents(NSString *dir, unsigned long long *freed)
         wq_log(@"purge: %@ -> unsafe ancestry or inaccessible (%@)", dir, wq_errno(errno));
         return NO;
     }
-    BOOL ok = wq_purge_fd(fd, dir, freed);
+    BOOL ok = wq_purge_fd(fd, dir, freed, cancellation);
     close(fd);
     return ok;
+}
+
+BOOL wq_purge_contents(NSString *dir, unsigned long long *freed)
+{
+    return wq_purge_contents_cancellable(dir, freed, nil);
 }
 
 // Flush a completed staging tree without following any links or opening special
@@ -1472,7 +1482,7 @@ BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString **errorText)
         NSError *copyError = nil;
         BOOL ok = wq_directory_current(stagePath, stage) && [fm copyItemAtPath:src toPath:newPath error:&copyError];
         if (!ok && wq_grant(src) && wq_directory_current(srcDir, source) && wq_directory_current(stagePath, stage)) {
-            if (wq_remove_entry(stage, @"New", newPath, NULL)) {
+            if (wq_remove_entry(stage, @"New", newPath, NULL, nil)) {
                 NSError *retryError = nil;
                 ok = [fm copyItemAtPath:src toPath:newPath error:&retryError];
                 if (!ok) copyError = retryError ?: copyError;
@@ -1496,7 +1506,7 @@ BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString **errorText)
         NSString *failure = ok ? nil : copyError.localizedDescription ?: wq_errno(errno);
         // Never erase the preserved destination if installation durability failed.
         BOOL cleaned = !installed || ok;
-        if (cleaned) cleaned = wq_remove_entry(stage, @"New", newPath, NULL);
+        if (cleaned) cleaned = wq_remove_entry(stage, @"New", newPath, NULL, nil);
         close(stage);
         if (cleaned) cleaned = unlinkat(destination, stageName.fileSystemRepresentation, AT_REMOVEDIR) == 0 && fsync(destination) == 0;
         if (!ok || !cleaned) {

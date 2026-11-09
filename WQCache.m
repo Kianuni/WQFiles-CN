@@ -372,6 +372,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     NSString *_result;   // last clean result
     BOOL _scanning, _cleaning, _scanLimited, _cleanRequiresRescan;
     WQScanCancellation *_scanCancellation;
+    WQScanCancellation *_cleanCancellation;
     NSUInteger _scanGeneration;
     NSTimeInterval _lastScanFinished;
 }
@@ -412,6 +413,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 {
     [super viewWillDisappear:animated];
     if (_scanning) [_scanCancellation cancel];
+    if (_cleaning) [_cleanCancellation cancel];
     [self.refreshControl endRefreshing];
 }
 
@@ -448,8 +450,14 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 
 - (void)updateButtons
 {
-    if (_scanning || _cleaning) {
+    if (_scanning) {
         self.navigationItem.rightBarButtonItems = nil;
+        return;
+    }
+    if (_cleaning) {
+        UIBarButtonItem *stop = [[UIBarButtonItem alloc] initWithTitle:@"Stop" style:UIBarButtonItemStylePlain
+                                                                 target:self action:@selector(stopClean)];
+        self.navigationItem.rightBarButtonItems = @[stop];
         return;
     }
     NSUInteger n = 0;
@@ -671,7 +679,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     if (section == 0 || !_items.count) return nil;
     NSArray<WQCacheItem *> *selected = [_items filteredArrayUsingPredicate:
         [NSPredicate predicateWithFormat:@"selected == YES"]];
-    return WQCacheFooterScope(selected);
+    return [WQCacheFooterScope(selected) stringByAppendingString:@" Close running apps first."];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
@@ -778,6 +786,12 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     [self updateButtons];
 }
 
+- (void)stopClean
+{
+    [_cleanCancellation cancel];
+    [self setStatus:@"Stopping after the current item…"];
+}
+
 - (void)confirmClean
 {
     NSMutableArray<WQCacheItem *> *selected = [NSMutableArray new];
@@ -788,7 +802,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
         sel += item.bytes;
     }
     if (!selected.count) return;
-    NSString *msg = [NSString stringWithFormat:@"%@, about %@? This cannot be undone.",
+    NSString *msg = [NSString stringWithFormat:@"%@, about %@? This cannot be undone. Close the selected apps first; you can stop between items.",
                      WQCacheConfirmationScope(selected), wq_size_text(sel)];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clean caches?" message:msg
                                                             preferredStyle:UIAlertControllerStyleAlert];
@@ -802,14 +816,18 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 - (void)clean
 {
     NSArray<WQCacheItem *> *selected = [_items filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"selected == YES"]];
+    WQScanCancellation *cancellation = [WQScanCancellation new];
+    _cleanCancellation = cancellation;
     _cleaning = YES;
     [self updateButtons];
     [self setStatus:@"Cleaning…"];
     dispatch_async(wq_io(), ^{
         unsigned long long freed = 0;
         BOOL allOk = YES;
+        BOOL cancelled = NO;
         NSString *validationFailure = nil;
         for (WQCacheItem *item in selected) {
+            if (cancellation.isCancelled) { cancelled = YES; break; }
             NSString *reason = nil;
             if (!WQCacheValidateItem(item, &reason)) {
                 allOk = NO;
@@ -820,6 +838,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
         if (validationFailure) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_cleaning = NO;
+                self->_cleanCancellation = nil;
                 self->_scanLimited = YES;
                 self->_cleanRequiresRescan = YES;
                 self->_status = nil;
@@ -831,12 +850,14 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
         }
         NSUInteger i = 0;
         for (WQCacheItem *item in selected) {
+            if (cancellation.isCancelled) { cancelled = YES; break; }
             i++;
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self setStatus:[NSString stringWithFormat:@"Cleaning %lu of %lu: %@",
                                  (unsigned long)i, (unsigned long)selected.count, item.name]];
             });
             for (WQCacheTargetRecord *record in item.targetRecords) {
+                if (cancellation.isCancelled) { cancelled = YES; break; }
                 NSString *reason = nil;
                 if (!WQCacheValidateItem(item, &reason)) {
                     allOk = NO;
@@ -844,13 +865,24 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
                     wq_log(@"clean: stopped before %@ because %@", record.path, reason ?: @"identity validation failed");
                     break;
                 }
-                if (!wq_purge_contents(record.path, &freed)) allOk = NO;
+                if (!wq_purge_contents_cancellable(record.path, &freed, cancellation)) {
+                    allOk = NO;
+                    if (cancellation.isCancelled) { cancelled = YES; break; }
+                }
             }
-            if (validationFailure) break;
+            if (validationFailure || cancelled) break;
         }
-        wq_log(@"clean: freed %llu bytes, allOk=%d", freed, allOk);
+        wq_log(@"clean: freed %llu bytes, allOk=%d cancelled=%d", freed, allOk, cancelled);
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_cleaning = NO;
+            self->_cleanCancellation = nil;
+            if (cancelled) {
+                self->_status = nil;
+                [self scan];
+                self->_result = [NSString stringWithFormat:@"Stopped. Freed %@.%@", wq_size_text(freed),
+                                 allOk ? @"" : @" Some items could not be removed (see Log)."];
+                return;
+            }
             if (validationFailure) {
                 self->_scanLimited = YES;
                 self->_cleanRequiresRescan = YES;
