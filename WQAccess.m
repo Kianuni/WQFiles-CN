@@ -306,8 +306,12 @@ NSString *wq_app_backup_root(void)
 BOOL wq_is_backup_storage_path(NSString *path)
 {
     NSString *original = WQCanonicalVarPath(path);
-    for (NSString *root in @[WQCanonicalVarPath(wq_backup_root()), WQCanonicalVarPath(wq_app_backup_root())]) {
-        if (!root.length) continue;
+    NSMutableArray<NSString *> *roots = [NSMutableArray new];
+    NSString *fileRoot = WQCanonicalVarPath(wq_backup_root());
+    NSString *appRoot = WQCanonicalVarPath(wq_app_backup_root());
+    if (fileRoot.length) [roots addObject:fileRoot];
+    if (appRoot.length) [roots addObject:appRoot];
+    for (NSString *root in roots) {
         if ([original isEqualToString:root] || [original hasPrefix:[root stringByAppendingString:@"/"]]) return YES;
     }
     return NO;
