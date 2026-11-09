@@ -384,17 +384,31 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         return NO;
     }
 
-    // Pass 2: the strings, preferring copies inside the string table.
+    // Pass 2: the strings, preferring copies inside the string table. On
+    // iOS 26 container paths live in a second table whose ids overlap the
+    // string table's, so path-shaped strings are also kept by id on their own
+    // (an id with two different paths is unusable).
     NSMutableDictionary<NSNumber *, NSString *> *strings = [NSMutableDictionary new];
+    NSMutableDictionary<NSNumber *, id> *pathStrings = [NSMutableDictionary new];
     NSUInteger decodedStringBytes = 0;
     BOOL tooManyStrings = NO;
     for (size_t o = 0; o <= n - 8; o += 4) {
         uint32_t sid = wq_rd32(b + o);
         if (!sid || sid >= kIDs || !(need[sid / 8] & (1 << (sid % 8)))) continue;
         BOOL here = o >= heap, had = strings[@(sid)] != nil;
-        if (had && (!here || (inHeap[sid / 8] & (1 << (sid % 8))))) continue;
+        BOOL keepGeneral = !had || (here && !(inHeap[sid / 8] & (1 << (sid % 8))));
+        uint32_t peekLen = o + 8 <= n ? wq_rd32(b + o + 4) : 0;
+        BOOL maybePath = peekLen >= 40 && peekLen < 0x100 && o + 8 + 40 <= n &&
+            memmem(b + o + 8, 40, "/mobile/Containers/Data/", 24) != NULL;
+        if (!keepGeneral && !maybePath) continue;
         NSString *s = wq_cs_string(b, n, o);
         if (!s) continue;
+        if (maybePath && [s containsString:@"/mobile/Containers/Data/"]) {
+            id previous = pathStrings[@(sid)];
+            if (!previous) pathStrings[@(sid)] = s;
+            else if (![previous isEqual:s]) pathStrings[@(sid)] = NSNull.null;
+        }
+        if (!keepGeneral) continue;
         if (!had && (strings.count >= kWQLSMaxDecodedStrings ||
                      s.length > kWQLSMaxDecodedStringBytes - decodedStringBytes)) {
             tooManyStrings = YES;
@@ -421,6 +435,11 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         return NO;
     }
 
+    NSString *(^pathFor)(uint32_t) = ^NSString *(uint32_t ref) {
+        id path = pathStrings[@(ref >> 2)];
+        if (path == NSNull.null) return nil;
+        return path ?: strings[@(ref >> 2)];
+    };
     NSDictionary *display = nil, *bundleName = nil, *containers = nil;
     size_t chosen = 0;
     for (size_t l = 0; l < kWQLSLayoutCount; l++) {
@@ -431,7 +450,9 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         // only app containers, so a record type that happens to share a size
         // can't knock out the other table's paths.
         void (^claim)(NSString *, NSString *, NSString *) = ^(NSString *path, NSString *bid, NSString *kind) {
-            // iOS 26 stores /var/mobile/...; lookups use the /private/var form.
+            // iOS 26 stores container paths with a trailing slash; lookups
+            // use the /private/var form without one.
+            if ([path hasSuffix:@"/"]) path = [path substringToIndex:path.length - 1];
             if ([path hasPrefix:@"/var/"]) path = [@"/private" stringByAppendingString:path];
             if (!wq_is_data_container_path(path) || !wq_looks_like_bundle_id(bid) || ![path containsString:kind]) return;
             id known = layoutContainers[path];
@@ -441,12 +462,12 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         NSData *plugins = layoutPlugins[l], *recs = layoutRecs[l];
         const uint32_t *pr = plugins.bytes;
         for (NSUInteger i = 0; i < plugins.length / sizeof(uint32_t); i += 2)
-            claim(strings[@(pr[i + 1] >> 2)], strings[@(pr[i] >> 2)], @"/Data/PluginKitPlugin/");
+            claim(pathFor(pr[i + 1]), strings[@(pr[i] >> 2)], @"/Data/PluginKitPlugin/");
         const uint32_t *r = recs.bytes;
         for (NSUInteger i = 0; i < recs.length / sizeof(uint32_t); i += 4) {
             NSString *bid = strings[@(r[i] >> 2)];
             if (!wq_looks_like_bundle_id(bid)) continue;
-            if (r[i + 3] && !(r[i + 3] & 3)) claim(strings[@(r[i + 3] >> 2)], bid, @"/Data/Application/");
+            if (r[i + 3] && !(r[i + 3] & 3)) claim(pathFor(r[i + 3]), bid, @"/Data/Application/");
             NSString *nm = (r[i + 1] & 3) ? nil : strings[@(r[i + 1] >> 2)];
             NSString *dn = (r[i + 2] & 3) ? nil : strings[@(r[i + 2] >> 2)];
             NSString *safeDisplay = wq_safe_name(dn);
