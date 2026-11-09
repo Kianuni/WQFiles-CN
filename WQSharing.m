@@ -6,6 +6,20 @@
 #import "WQSharing.h"
 #import "WQUI.h"
 #import "WQAccess.h"
+#import <objc/runtime.h>
+#import <sys/stat.h>
+
+@interface WQSharePreparation : NSObject
+@property (nonatomic, weak) UIViewController *host;
+@property (nonatomic, weak) UIAlertController *hud;
+@property (nonatomic, copy) NSString *exportDir;
+@property (atomic, getter=isCancelled) BOOL cancelled;
+@end
+
+@implementation WQSharePreparation
+@end
+
+static char kWQSharePreparationKey;
 
 static NSString *wq_unique_export_directory(void)
 {
@@ -16,37 +30,103 @@ static NSString *wq_unique_export_directory(void)
                                                    attributes:nil error:&error] ? dir : nil;
 }
 
-static void wq_present_share(UIViewController *host, NSString *file, NSString *exportDir, UIView *source)
+static void wq_remove_export(NSString *exportDir)
 {
+    if (exportDir.length) [NSFileManager.defaultManager removeItemAtPath:exportDir error:nil];
+}
+
+static BOOL wq_share_host_is_active(UIViewController *host)
+{
+    if (!host || !host.isViewLoaded || !host.view.window) return NO;
+    UIWindowScene *scene = host.view.window.windowScene;
+    if (scene && scene.activationState != UISceneActivationStateForegroundActive) return NO;
+    UINavigationController *nav = host.navigationController;
+    if (nav && nav.topViewController != host) return NO;
+    if (host.presentedViewController && !host.presentedViewController.isBeingDismissed) return NO;
+    return YES;
+}
+
+static BOOL wq_shareable_regular_file(NSString *path)
+{
+    if (!path.length) return NO;
+    struct stat st;
+    if (stat(path.fileSystemRepresentation, &st) == 0) return S_ISREG(st.st_mode);
+    if (wq_grant(path) && stat(path.fileSystemRepresentation, &st) == 0) return S_ISREG(st.st_mode);
+    return NO;
+}
+
+static void wq_clear_preparation(UIViewController *host, WQSharePreparation *preparation)
+{
+    if (objc_getAssociatedObject(host, &kWQSharePreparationKey) == preparation) {
+        objc_setAssociatedObject(host, &kWQSharePreparationKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static BOOL wq_present_share(UIViewController *host, NSString *file, NSString *exportDir, UIView *source)
+{
+    if (!wq_share_host_is_active(host)) {
+        wq_remove_export(exportDir);
+        return NO;
+    }
     UIActivityViewController *share = [[UIActivityViewController alloc]
         initWithActivityItems:@[[NSURL fileURLWithPath:file]] applicationActivities:nil];
-    share.popoverPresentationController.sourceView = source ?: host.view;
-    share.popoverPresentationController.sourceRect = (source ?: host.view).bounds;
+    UIView *anchor = source.window ? source : host.view;
+    share.popoverPresentationController.sourceView = anchor;
+    share.popoverPresentationController.sourceRect = anchor.bounds;
     share.completionWithItemsHandler = ^(UIActivityType __unused activityType, BOOL __unused completed,
                                          NSArray *__unused returnedItems, NSError *__unused activityError) {
-        [NSFileManager.defaultManager removeItemAtPath:exportDir error:nil];
+        wq_remove_export(exportDir);
     };
-    [host presentViewController:share animated:YES completion:nil];
+    [host presentViewController:share animated:YES completion:^{
+        // A presentation rejected after the visibility check must not strand the export.
+        if (!share.presentingViewController) wq_remove_export(exportDir);
+    }];
+    return YES;
+}
+
+// Cancel folder preparation when its browser is popped or otherwise abandoned.
+// The export is removed by the worker's completion, after any in-progress copy has stopped.
+void wq_share_cancel(UIViewController *host)
+{
+    WQSharePreparation *preparation = objc_getAssociatedObject(host, &kWQSharePreparationKey);
+    preparation.cancelled = YES;
+    if (host) objc_setAssociatedObject(host, &kWQSharePreparationKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIAlertController *hud = preparation.hud;
+    if (hud && host.presentedViewController == hud) {
+        [host dismissViewControllerAnimated:NO completion:nil];
+    }
 }
 
 // Copies a file into a unique temporary directory so concurrent shares cannot
 // overwrite one another. The export is removed when the share sheet finishes.
 void wq_share(UIViewController *host, NSString *path, UIView *source)
 {
-    // Streamed in chunks (large files), and not on the serial I/O queue, which
-    // may be busy with a container scan.
+    __weak UIViewController *weakHost = host;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
-        NSString *outDir = wq_unique_export_directory();
-        NSString *tmp = outDir ? [outDir stringByAppendingPathComponent:path.lastPathComponent] : nil;
-        BOOL ok = tmp && wq_copy_to_local(path, tmp, &error);
+        NSString *outDir = nil;
+        NSString *tmp = nil;
+        BOOL ok = NO;
+        if (!wq_shareable_regular_file(path)) {
+            error = @"Only regular files can be shared.";
+        } else {
+            outDir = wq_unique_export_directory();
+            tmp = outDir ? [outDir stringByAppendingPathComponent:path.lastPathComponent] : nil;
+            ok = tmp && wq_copy_to_local(path, tmp, &error);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *strongHost = weakHost;
             if (!ok) {
-                if (outDir) [NSFileManager.defaultManager removeItemAtPath:outDir error:nil];
-                wq_alert(host, @"Cannot share", error ?: @"Could not create a temporary export folder");
+                wq_remove_export(outDir);
+                if (wq_share_host_is_active(strongHost)) {
+                    wq_alert(strongHost, @"Cannot share", error ?: @"Could not create a temporary export folder");
+                }
                 return;
             }
-            wq_present_share(host, tmp, outDir, source);
+            if (!wq_share_host_is_active(strongHost) ||
+                !wq_present_share(strongHost, tmp, outDir, source)) {
+                wq_remove_export(outDir);
+            }
         });
     });
 }
@@ -57,38 +137,53 @@ static NSString *wq_zip_name(NSString *dir);
 // share sheet, so a backup can go out over AirDrop, Files, Mail…
 void wq_share_folder(UIViewController *host, NSString *dir, NSString *zipName, UIView *source)
 {
+    if (!wq_share_host_is_active(host)) return;
+    WQSharePreparation *preparation = [WQSharePreparation new];
+    preparation.host = host;
     UIAlertController *hud = [UIAlertController alertControllerWithTitle:@"Preparing…"
         message:@"Compressing the folder" preferredStyle:UIAlertControllerStyleAlert];
+    preparation.hud = hud;
+    objc_setAssociatedObject(host, &kWQSharePreparationKey, preparation, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [host presentViewController:hud animated:YES completion:nil];
     dispatch_async(wq_io(), ^{
+        if (preparation.isCancelled) return;
         NSString *resolvedName = zipName ?: wq_zip_name(dir);
         NSString *safe = [[resolvedName componentsSeparatedByCharactersInSet:
                            [NSCharacterSet characterSetWithCharactersInString:@"/:"]] componentsJoinedByString:@"-"];
         NSString *outDir = wq_unique_export_directory();
+        preparation.exportDir = outDir;
         NSString *zip = outDir ? [outDir stringByAppendingPathComponent:[safe stringByAppendingPathExtension:@"zip"]] : nil;
         NSFileManager *fm = NSFileManager.defaultManager;
         wq_grant(dir);
         __block NSError *copyError = nil;
         NSError *coordError = nil;
-        if (zip) {
+        if (zip && !preparation.isCancelled) {
             [[NSFileCoordinator new] coordinateReadingItemAtURL:[NSURL fileURLWithPath:dir]
                                                         options:NSFileCoordinatorReadingForUploading
                                                           error:&coordError byAccessor:^(NSURL *zipped) {
-                [fm copyItemAtURL:zipped toURL:[NSURL fileURLWithPath:zip] error:&copyError];
+                if (!preparation.isCancelled) [fm copyItemAtURL:zipped toURL:[NSURL fileURLWithPath:zip] error:&copyError];
             }];
         }
-        BOOL ok = zip && [fm fileExistsAtPath:zip];
+        BOOL ok = zip && !preparation.isCancelled && [fm fileExistsAtPath:zip];
         NSString *why = (coordError ?: copyError).localizedDescription ?: @"Could not create the ZIP";
         wq_log(@"share zip: %@ -> %@ %@", dir, zip.lastPathComponent, ok ? @"OK" : why);
         dispatch_async(dispatch_get_main_queue(), ^{
-            [hud dismissViewControllerAnimated:YES completion:^{
-                if (!ok) {
-                    if (outDir) [fm removeItemAtPath:outDir error:nil];
-                    wq_alert(host, @"Cannot share", why);
+            UIViewController *strongHost = preparation.host;
+            BOOL hudPresented = strongHost && strongHost.presentedViewController == hud;
+            void (^finish)(void) = ^{
+                BOOL stale = preparation.isCancelled || !wq_share_host_is_active(strongHost);
+                wq_clear_preparation(strongHost, preparation);
+                if (!ok || stale) {
+                    wq_remove_export(outDir);
+                    if (!stale && wq_share_host_is_active(strongHost)) {
+                        wq_alert(strongHost, @"Cannot share", why);
+                    }
                     return;
                 }
-                wq_present_share(host, zip, outDir, source);
-            }];
+                if (!wq_present_share(strongHost, zip, outDir, source)) wq_remove_export(outDir);
+            };
+            if (hudPresented) [strongHost dismissViewControllerAnimated:YES completion:finish];
+            else finish();
         });
     });
 }
@@ -108,4 +203,3 @@ static NSString *wq_zip_name(NSString *dir)
     }
     return dir.lastPathComponent;
 }
-

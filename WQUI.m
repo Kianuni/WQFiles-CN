@@ -213,6 +213,12 @@ dispatch_queue_t wq_io(void)
 
 void wq_alert(UIViewController *host, NSString *title, NSString *message)
 {
+    if (!host || !host.isViewLoaded || !host.view.window) return;
+    UIWindowScene *scene = host.view.window.windowScene;
+    if (scene && scene.activationState != UISceneActivationStateForegroundActive) return;
+    UINavigationController *nav = host.navigationController;
+    if (nav && nav.topViewController != host) return;
+    if (host.presentedViewController && !host.presentedViewController.isBeingDismissed) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -224,4 +230,3 @@ NSString *wq_size_text(unsigned long long size)
     if (size == 0) return @"0 KB";
     return [NSByteCountFormatter stringFromByteCount:(long long)size countStyle:NSByteCountFormatterCountStyleFile];
 }
-
