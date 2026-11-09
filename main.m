@@ -282,6 +282,8 @@ static void wq_share(UIViewController *host, NSString *path, UIView *source)
     });
 }
 
+static NSString *wq_zip_name(NSString *dir);
+
 // Zips a folder (the system's own zipper via NSFileCoordinator) and opens the
 // share sheet, so a backup can go out over AirDrop, Files, Mail…
 static void wq_share_folder(UIViewController *host, NSString *dir, NSString *zipName, UIView *source)
@@ -290,7 +292,8 @@ static void wq_share_folder(UIViewController *host, NSString *dir, NSString *zip
         message:@"Compressing the folder" preferredStyle:UIAlertControllerStyleAlert];
     [host presentViewController:hud animated:YES completion:nil];
     dispatch_async(wq_io(), ^{
-        NSString *safe = [[zipName componentsSeparatedByCharactersInSet:
+        NSString *resolvedName = zipName ?: wq_zip_name(dir);
+        NSString *safe = [[resolvedName componentsSeparatedByCharactersInSet:
                            [NSCharacterSet characterSetWithCharactersInString:@"/:"]] componentsJoinedByString:@"-"];
         NSString *outDir = wq_unique_export_directory();
         NSString *zip = outDir ? [outDir stringByAppendingPathComponent:[safe stringByAppendingPathExtension:@"zip"]] : nil;
@@ -1051,7 +1054,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             [actions addObject:[UIAction actionWithTitle:@"Share as ZIP (AirDrop…)" image:[UIImage systemImageNamed:@"square.and.arrow.up"]
                                               identifier:nil handler:^(UIAction *a) {
                 UITableViewCell *cell = [weakSelf.tableView cellForRowAtIndexPath:indexPath];
-                if (weakSelf) wq_share_folder(weakSelf, item.path, wq_zip_name(item.path), cell);
+                if (weakSelf) wq_share_folder(weakSelf, item.path, nil, cell);
             }]];
         }
         if (!item.isDir) {
@@ -1842,6 +1845,7 @@ static NSString *const kCrashLogsPath =
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic) unsigned long long bytes;
 @property (nonatomic) BOOL hasAccess;
+@property (nonatomic, copy) NSArray<NSDictionary *> *backups;
 @end
 @implementation WQAppItem
 @end
@@ -1901,11 +1905,6 @@ static NSArray<NSDictionary *> *wq_app_backups(NSString *bundleID)
                           @"reason": m[@"Reason"] ?: @"" }];
     }
     return out;
-}
-
-static NSString *wq_latest_app_backup(NSString *bundleID)
-{
-    return wq_app_backups(bundleID).firstObject[@"path"];
 }
 
 static NSString *wq_backup_label(NSDictionary *backup)
@@ -2054,6 +2053,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
             app.name = bid.length ? (wq_display_name(bid) ?: bid)
                                   : [NSString stringWithFormat:@"Unknown container (%@)", c.lastPathComponent];
             app.bytes = granted ? wq_dir_size(c) : 0;
+            app.backups = granted && bid.length ? wq_app_backups(bid) : @[];
             [apps addObject:app];
         }
         if (cancellation.isCancelled) return;
@@ -2127,7 +2127,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     WQAppItem *app = self.visibleApps[(NSUInteger)indexPath.row];
     c.text = app.name;
     NSString *identifier = app.bundleID.length ? app.bundleID : app.container.lastPathComponent;
-    BOOL hasBackup = app.hasAccess && app.bundleID.length && wq_latest_app_backup(app.bundleID) != nil;
+    BOOL hasBackup = app.backups.count > 0;
     if (!app.hasAccess) {
         c.secondaryText = [NSString stringWithFormat:@"Access unavailable · %@", identifier];
     } else if (!app.bundleID.length) {
@@ -2176,7 +2176,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
     [sheet addAction:[UIAlertAction actionWithTitle:@"Back Up Data" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         [self backUp:app then:nil];
     }]];
-    NSArray *backups = wq_app_backups(app.bundleID);
+    NSArray *backups = app.backups;
     NSString *latest = backups.firstObject[@"path"];
     if (latest) {
         NSString *title = backups.count == 1 ? [NSString stringWithFormat:@"Restore Backup (%@)", wq_backup_label(backups.firstObject)]
@@ -2263,7 +2263,7 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
 
 - (void)pickBackupToRestore:(WQAppItem *)app from:(UIView *)source
 {
-    NSArray *backups = wq_app_backups(app.bundleID);
+    NSArray *backups = app.backups;
     if (backups.count == 1) { [self confirmRestore:app from:backups.firstObject]; return; }
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Restore which backup?" message:app.name
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
