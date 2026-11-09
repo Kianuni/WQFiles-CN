@@ -297,6 +297,10 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, dev
     NSFileManager *fm = NSFileManager.defaultManager;
     if (!wq_validate_container(container, bundleID, expectedDevice, expectedInode, error)) return nil;
     NSString *root = wq_app_backup_root_for_bundle(bundleID);
+    if (!root.length) {
+        if (error) *error = @"Cannot locate the app backup folder";
+        return nil;
+    }
     [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
     for (NSString *name in [fm contentsOfDirectoryAtPath:root error:nil])   // leftovers of interrupted runs
         if ([name hasPrefix:kBackupStagingPrefix]) [fm removeItemAtPath:[root stringByAppendingPathComponent:name] error:nil];
