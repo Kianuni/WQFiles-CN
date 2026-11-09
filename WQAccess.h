@@ -8,6 +8,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import "WQLaunchServices.h"
 #import <sys/stat.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -99,10 +100,6 @@ BOOL wq_copy_contents(NSString *srcDir, NSString *dstDir, NSString *_Nullable *_
 
 // MCM container identifier (bundle or group id) of a container folder.
 NSString *_Nullable wq_container_label(NSString *dir);
-
-// Human app name for a bundle id, from LaunchServices' database (read from
-// lsd's container), a built-in table of Apple services, or the parent app.
-NSString *_Nullable wq_display_name(NSString *_Nullable bundleID);
 
 // Backups of overwritten or deleted files, mirrored by original path.
 NSString *wq_backup_root(void);
