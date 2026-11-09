@@ -1251,6 +1251,16 @@ static BOOL wq_directory_current(NSString *path, int fd)
 
 static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned long long *freed);
 
+// Purge uses fd-relative removal, so the path is only a swap detector. One
+// lstat is enough; reopening every ancestor for every child is needlessly
+// expensive on large caches.
+static BOOL wq_purge_root_matches(NSString *path, int fd)
+{
+    struct stat pathStat, fdStat;
+    return lstat(path.fileSystemRepresentation, &pathStat) == 0 &&
+           fstat(fd, &fdStat) == 0 && WQSameObject(&pathStat, &fdStat);
+}
+
 static BOOL wq_purge_fd(int fd, NSString *path, unsigned long long *freed)
 {
     int listing = dup(fd);
@@ -1268,7 +1278,7 @@ static BOOL wq_purge_fd(int fd, NSString *path, unsigned long long *freed)
         WQ_TREE_HOOK(@"purgeChild", path);
         // Fail closed on changed ancestry; all removal remains fd-relative even
         // in the final race window. Symlink children are unlinked, never followed.
-        if (!wq_directory_current(path, fd)) { ok = NO; break; }
+        if (!wq_purge_root_matches(path, fd)) { ok = NO; break; }
         if (!wq_remove_entry(fd, name, [path stringByAppendingPathComponent:name], freed)) ok = NO;
     }
     if (closedir(dir) != 0) ok = NO;
@@ -1287,7 +1297,7 @@ static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned
             child = openat(parent, item, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (child < 0) return NO;
         BOOL ok = fstat(child, &current) == 0 && WQSameObject(&before, &current) &&
-            wq_directory_current(path, child) && wq_purge_fd(child, path, freed);
+            wq_purge_root_matches(path, child) && wq_purge_fd(child, path, freed);
         close(child);
         if (!ok) return NO;
     }
