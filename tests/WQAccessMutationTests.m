@@ -73,6 +73,29 @@ int main(void)
             check(!wq_create_file_from([wq_test_app_backup_root stringByAppendingPathComponent:@"copy"], appSource, &error), @"app backup streamed create refused");
             check(!wq_copy_to_local(appSource, [wq_test_app_backup_root stringByAppendingPathComponent:@"export"], &error), @"app backup local copy refused");
 
+            NSString *streamSource = [base stringByAppendingPathComponent:@"stream-source"];
+            NSString *streamDest = [base stringByAppendingPathComponent:@"stream-dest"];
+            put(streamSource, @"source bytes");
+            put(streamDest, @"destination original");
+            wq_test_stream_hook = ^(NSString *stage, NSString *path) {
+                if ([stage isEqual:@"ready"] && [path isEqual:streamSource]) {
+                    put(streamSource, @"source changed while streaming");
+                }
+            };
+            check(!wq_write_from_file(streamDest, streamSource, &error) && has(streamDest, @"destination original"),
+                  @"streamed write rejects a source that changes during the copy");
+            wq_test_stream_hook = nil;
+            put(streamSource, @"source bytes");
+            NSString *streamNew = [base stringByAppendingPathComponent:@"stream-new"];
+            wq_test_stream_hook = ^(NSString *stage, NSString *path) {
+                if ([stage isEqual:@"ready"] && [path isEqual:streamSource]) {
+                    put(streamSource, @"source changed while streaming");
+                }
+            };
+            check(!wq_create_file_from(streamNew, streamSource, &error) && ![fm fileExistsAtPath:streamNew],
+                  @"streamed create removes a partial destination when the source changes");
+            wq_test_stream_hook = nil;
+
             // Deterministic version change after descriptor verification, before backup.
             put(file, @"original");
             version = wq_file_version(file);
@@ -191,6 +214,7 @@ int main(void)
             wq_test_volume_limit = -1;
         } @finally {
             wq_test_mutation_hook = nil;
+            wq_test_stream_hook = nil;
             wq_test_backup_root = nil;
             wq_test_app_backup_root = nil;
             wq_test_volume_limit = -1;

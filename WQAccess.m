@@ -274,11 +274,14 @@ static NSString *wq_test_app_backup_root;
 static int64_t wq_test_volume_limit = -1;
 static void (^wq_test_mutation_hook)(NSString *stage, NSString *path);
 static void (^wq_test_tree_hook)(NSString *stage, NSString *path);
+static void (^wq_test_stream_hook)(NSString *stage, NSString *path);
 #define WQ_TREE_HOOK(stage, path) do { if (wq_test_tree_hook) wq_test_tree_hook(stage, path); } while (0)
 #define WQ_MUTATION_HOOK(stage, path) do { if (wq_test_mutation_hook) wq_test_mutation_hook(stage, path); } while (0)
+#define WQ_STREAM_HOOK(stage, path) do { if (wq_test_stream_hook) wq_test_stream_hook(stage, path); } while (0)
 #else
 #define WQ_MUTATION_HOOK(stage, path) do {} while (0)
 #define WQ_TREE_HOOK(stage, path) do {} while (0)
+#define WQ_STREAM_HOOK(stage, path) do {} while (0)
 #endif
 
 NSString *wq_backup_root(void)
@@ -715,10 +718,18 @@ BOOL wq_write_from_file(NSString *path, NSString *source, NSString **errorText)
         if (errorText) *errorText = @"Source and destination are the same file";
         close(in); wq_mutation_close(&mutation); return NO;
     }
+    NSDictionary *sourceVersion = wq_version_for_stat(&src);
     NSString *backup = nil;
     if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { close(in); wq_mutation_close(&mutation); return NO; }
+    WQ_STREAM_HOOK(@"ready", source);
     NSString *error = nil;
     BOOL ok = lseek(mutation.fd, 0, SEEK_SET) >= 0 && ftruncate(mutation.fd, 0) == 0 && wq_stream(in, mutation.fd, &error);
+    struct stat srcAfter = {0};
+    if (ok && (fstat(in, &srcAfter) != 0 ||
+               ![sourceVersion isEqualToDictionary:wq_version_for_stat(&srcAfter)])) {
+        ok = NO;
+        error = @"The source changed while it was being copied";
+    }
     if (!ok && !error) error = wq_errno(errno);
     close(in);
     return wq_mutation_finish(path, &mutation, backup, ok, error, errorText, nil, nil, nil);
@@ -734,8 +745,22 @@ BOOL wq_create_file_from(NSString *path, NSString *source, NSString **errorText)
     if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
     int fd = wq_open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
+    struct stat srcBefore = {0};
+    if (fstat(in, &srcBefore) != 0) {
+        close(fd); close(in); unlink(path.fileSystemRepresentation);
+        if (errorText) *errorText = @"Cannot inspect the copy source";
+        return NO;
+    }
+    NSDictionary *sourceVersion = wq_version_for_stat(&srcBefore);
+    WQ_STREAM_HOOK(@"ready", source);
     NSString *error = nil;
     BOOL ok = wq_stream(in, fd, &error);
+    struct stat srcAfter = {0};
+    if (ok && (fstat(in, &srcAfter) != 0 ||
+               ![sourceVersion isEqualToDictionary:wq_version_for_stat(&srcAfter)])) {
+        ok = NO;
+        error = @"The source changed while it was being copied";
+    }
     close(in);
     if (close(fd) != 0 && ok) { ok = NO; error = wq_errno(errno); }
     if (!ok) unlink(path.fileSystemRepresentation);
