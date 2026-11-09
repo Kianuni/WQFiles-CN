@@ -270,6 +270,7 @@ static BOOL wq_is_denied(int err) { return err == EPERM || err == EACCES; }
 
 #ifdef WQ_ACCESS_TESTING
 static NSString *wq_test_backup_root;
+static int64_t wq_test_volume_limit = -1;
 static void (^wq_test_mutation_hook)(NSString *stage, NSString *path);
 static void (^wq_test_tree_hook)(NSString *stage, NSString *path);
 #define WQ_TREE_HOOK(stage, path) do { if (wq_test_tree_hook) wq_test_tree_hook(stage, path); } while (0)
@@ -948,6 +949,9 @@ extern ssize_t fsgetpath(char *buf, size_t buflen, fsid_t *fsid, uint64_t objid)
 // apps; a fixed limit misses them on a well-used device.
 static int64_t wq_volume_max_inode(fsid_t fsid)
 {
+#ifdef WQ_ACCESS_TESTING
+    if (wq_test_volume_limit >= 0) return wq_test_volume_limit;
+#endif
     NSString *probe = [NSTemporaryDirectory() stringByAppendingPathComponent:
                        [NSString stringWithFormat:@"wq-inode-%u", arc4random()]];
     int fd = open(probe.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY, 0600);
@@ -969,6 +973,7 @@ static int64_t wq_volume_max_inode(fsid_t fsid)
         wq_log(@"inode probe: %@ is on a different volume", probe);
         return 0;
     }
+    if ((uint64_t)st.st_ino > (uint64_t)INT64_MAX - 100000) return 0;
     return (int64_t)st.st_ino + 100000;
 }
 
@@ -987,9 +992,13 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
     if (maxInode <= 0) {
         maxInode = wq_volume_max_inode(fsid);
         if (maxInode <= 0) {
-            maxInode = 4000000;
-            wq_log(@"enumerate %@: dynamic inode limit unavailable; falling back to %lld", dir, (long long)maxInode);
+            wq_log(@"enumerate %@: dynamic inode limit unavailable; refusing to present a fixed-range partial scan as complete", dir);
+            return nil;
         }
+    }
+    if (maxInode > INT64_MAX - 32768) {
+        wq_log(@"enumerate %@: inode bound is too large to scan safely", dir);
+        return nil;
     }
     const char *prefix = base.fileSystemRepresentation;
     size_t prefixLen = strlen(prefix);

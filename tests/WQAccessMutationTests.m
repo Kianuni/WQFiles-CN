@@ -164,9 +164,15 @@ int main(void)
                 check(!ok && savedVersion == nil && has(file, @"external"), @"post-write interference is not adopted or rolled back over");
                 wq_test_mutation_hook = nil;
             }
+            wq_test_volume_limit = 0;
+            check(wq_enumerate(base, 0, nil, nil) == nil, @"unavailable inode probe is failure, not silent fixed-range success");
+            check(wq_enumerate(base, 1, nil, nil) != nil, @"explicit small bound still supports successful empty enumeration");
+            check(wq_enumerate(base, INT64_MAX, nil, nil) == nil, @"overflowing scan bound is rejected before work dispatch");
+            wq_test_volume_limit = -1;
         } @finally {
             wq_test_mutation_hook = nil;
             wq_test_backup_root = nil;
+            wq_test_volume_limit = -1;
             [fm removeItemAtPath:base error:nil];
         }
     }
