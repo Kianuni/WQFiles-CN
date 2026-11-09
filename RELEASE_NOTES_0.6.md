@@ -1,7 +1,14 @@
 > **Requires:** iOS 27. Tested on iOS 27.0.1 (iPhone 17 Pro Max); other iOS 27 versions are untested.
-> **Needs:** a sideloading tool that keeps the App Group entitlement. If the Log says "No App Group", re-sign with one that does.
+> **Needs:** a sideloading tool that keeps the App Group entitlement. If the Log says "No App Group", re-sign with one that does; see [Signing](https://github.com/kolbicz/WQFiles#signing-the-app-group) in the README.
 
 # Worse Query Files 0.6
+
+## Cooler, faster scans
+
+- **One scan instead of three.** Apps, extensions and the app name database are found in a single pass, which is reused for 10 minutes. Pull down on Apps, Cache Cleaner or a folder to scan again, for example after installing an app.
+- **Scans run cooler.** They use at most four CPU cores at a lower priority, so the device stays cooler on phones with many files.
+- **No more "stuck at 100%".** The first time app names are loaded, the screen shows "Reading app names…" instead of standing still at "Finding apps… 100%".
+- **If the app name database isn't found**, WQ Files doesn't search again at every start, only after a day or when you pull to refresh.
 
 ## New
 
@@ -9,6 +16,7 @@
 - **Stop a cache clean** while it runs. The Cache Cleaner stops after the current item and tells you how much was freed.
 - **Cancel a ZIP export** while it's being prepared, instead of waiting for it to finish.
 - **iPad:** all orientations are supported.
+- **Signing help:** the README explains the App Group WQ Files needs, why wildcard profiles (Feather and similar) can't provide one, and how to sign instead.
 
 ## Safer backups and restores
 
@@ -41,4 +49,4 @@
 
 Sandbox technique: [worse_query](https://github.com/forcequitOS/worse_query) by Taj C (forcequit). Container enumeration: [KAMUI](https://github.com/murk-sus/kamui-escape) by murk-sus. GPL-3.0-or-later.
 
-SHA-256 of WQFiles.ipa: `4e0cf3531ce25f229ade438a3cfd014fe6eecb87cb5f3de8208ff3ce2a7168f3`
+SHA-256 of WQFiles.ipa: `73fc5790e9b9bec968c0253627356436c17bb6465b412683eff2700764e6e633`
