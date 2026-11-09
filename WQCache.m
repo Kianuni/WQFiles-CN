@@ -8,6 +8,9 @@
 #import "WQUI.h"
 #import "WQAccess.h"
 
+#import <errno.h>
+#import <sys/stat.h>
+
 #pragma mark - Cache cleaner
 
 @interface WQCacheItem : NSObject
@@ -16,12 +19,72 @@
 @property (nonatomic, copy) NSArray<NSString *> *targets;  // dirs to purge
 @property (nonatomic) unsigned long long cacheBytes;
 @property (nonatomic) unsigned long long tempBytes;
+@property (nonatomic) BOOL cacheKnown;
+@property (nonatomic) BOOL tempKnown;
+@property (nonatomic) BOOL limited;
+@property (nonatomic) BOOL crashLogs;
 @property (nonatomic) BOOL selected;
 @property (nonatomic, readonly) unsigned long long bytes;
 @end
 @implementation WQCacheItem
 - (unsigned long long)bytes { return self.cacheBytes + self.tempBytes; }
 @end
+
+typedef NS_ENUM(NSInteger, WQCacheMeasurementState) {
+    WQCacheMeasurementMissing,
+    WQCacheMeasurementKnown,
+    WQCacheMeasurementLimited,
+    WQCacheMeasurementCancelled,
+};
+
+static WQCacheMeasurementState WQCacheMeasureDirectory(NSString *path,
+                                                        WQScanCancellation *cancellation,
+                                                        unsigned long long *bytes)
+{
+    if (cancellation.isCancelled) return WQCacheMeasurementCancelled;
+    struct stat st = {0};
+    if (!wq_stat(path, &st)) {
+        struct stat direct = {0};
+        if (lstat(path.fileSystemRepresentation, &direct) != 0 &&
+            (errno == ENOENT || errno == ENOTDIR)) return WQCacheMeasurementMissing;
+        return WQCacheMeasurementLimited;
+    }
+    if (!S_ISDIR(st.st_mode)) return WQCacheMeasurementLimited;
+
+    // wq_list performs the access retry and, unlike wq_dir_size, exposes a
+    // failed root listing.  The enumerator below then measures the tree once
+    // while retaining cancellation checks between entries.
+    NSString *listError = nil;
+    NSArray<NSString *> *children = wq_list(path, &listError);
+    if (!children) {
+        wq_log(@"cache scan: cannot list %@%@", path,
+               listError.length ? [NSString stringWithFormat:@" (%@)", listError] : @"");
+        return WQCacheMeasurementLimited;
+    }
+    if (!children.count) {
+        if (bytes) *bytes = 0;
+        return WQCacheMeasurementKnown;
+    }
+
+    NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:path];
+    if (!enumerator) {
+        wq_log(@"cache scan: cannot enumerate %@", path);
+        return WQCacheMeasurementLimited;
+    }
+    unsigned long long total = 0;
+    for (NSString *__unused relativePath in enumerator) {
+        if (cancellation.isCancelled) return WQCacheMeasurementCancelled;
+        NSDictionary *attributes = enumerator.fileAttributes;
+        if (!attributes) {
+            wq_log(@"cache scan: missing attributes while enumerating %@", path);
+            return WQCacheMeasurementLimited;
+        }
+        if ([attributes.fileType isEqualToString:NSFileTypeRegular]) total += attributes.fileSize;
+    }
+    if (cancellation.isCancelled) return WQCacheMeasurementCancelled;
+    if (bytes) *bytes = total;
+    return WQCacheMeasurementKnown;
+}
 
 // Row: selection circle, icon, name with "cache · temp" below, size in a
 // fixed right-hand column so long names never push it out.
@@ -140,7 +203,7 @@
     NSString *_query;
     NSString *_status;   // scan / clean progress, nil when idle
     NSString *_result;   // last clean result
-    BOOL _scanning, _cleaning;
+    BOOL _scanning, _cleaning, _scanLimited;
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
 }
@@ -209,7 +272,7 @@ static NSString *const kCrashLogsPath =
     for (WQCacheItem *it in _items) if (it.selected) n++;
     UIBarButtonItem *clean = [[UIBarButtonItem alloc] initWithTitle:@"Clean" style:UIBarButtonItemStyleDone
                                                              target:self action:@selector(confirmClean)];
-    clean.enabled = n > 0;
+    clean.enabled = n > 0 && !_scanLimited;
     NSArray *visible = self.visibleItems;
     BOOL allVisible = visible.count > 0;
     for (WQCacheItem *it in visible) if (!it.selected) { allVisible = NO; break; }
@@ -236,11 +299,17 @@ static NSString *const kCrashLogsPath =
     _scanCancellation = cancellation;
     NSUInteger generation = ++_scanGeneration;
     _scanning = YES;
+    _scanLimited = NO;
     _result = nil;
     [self updateButtons];
     [self setStatus:@"Finding apps…"];
     dispatch_async(wq_io(), ^{
         NSMutableArray<WQCacheItem *> *items = [NSMutableArray new];
+        NSMutableArray<NSString *> *emptyRoots = [NSMutableArray new];
+        BOOL scanLimited = NO;
+        NSUInteger failedEnumerations = 0;
+        NSUInteger limitedContainers = 0;
+        NSUInteger limitedMeasurements = 0;
         NSArray *roots = @[@"/private/var/mobile/Containers/Data/Application",
                            @"/private/var/mobile/Containers/Data/PluginKitPlugin"];
         for (NSString *root in roots) {
@@ -252,6 +321,14 @@ static NSString *const kCrashLogsPath =
                     [self setStatus:[NSString stringWithFormat:@"Finding %@… %lld%%", kind, (long long)(done * 100 / total)]];
                 });
             });
+            if (!containers) {
+                if (cancellation.isCancelled) return;
+                scanLimited = YES;
+                failedEnumerations++;
+                wq_log(@"cache scan: %@ container enumeration failed", kind);
+                continue;
+            }
+            if (!containers.count) [emptyRoots addObject:kind];
             NSUInteger idx = 0;
             for (NSString *c in containers) {
                 if (cancellation.isCancelled) return;
@@ -263,40 +340,93 @@ static NSString *const kCrashLogsPath =
                                          (unsigned long)idx, (unsigned long)containers.count]];
                     });
                 }
-                wq_grant(c);  // one token for the whole container
+                BOOL granted = wq_grant(c);  // one token for the whole container
                 NSString *caches = [c stringByAppendingPathComponent:@"Library/Caches"];
                 NSString *tmp = [c stringByAppendingPathComponent:@"tmp"];
-                unsigned long long cacheBytes = wq_dir_size(caches), tempBytes = wq_dir_size(tmp);
-                if (cacheBytes + tempBytes < 64 * 1024) continue;
+                unsigned long long cacheBytes = 0, tempBytes = 0;
+                WQCacheMeasurementState cacheState = granted
+                    ? WQCacheMeasureDirectory(caches, cancellation, &cacheBytes)
+                    : WQCacheMeasurementLimited;
+                if (cacheState == WQCacheMeasurementCancelled) return;
+                WQCacheMeasurementState tempState = granted
+                    ? WQCacheMeasureDirectory(tmp, cancellation, &tempBytes)
+                    : WQCacheMeasurementLimited;
+                if (tempState == WQCacheMeasurementCancelled) return;
+                if (!granted) {
+                    scanLimited = YES;
+                    limitedContainers++;
+                    wq_log(@"cache scan: access grant failed for %@", c);
+                }
+                if (cacheState == WQCacheMeasurementLimited || tempState == WQCacheMeasurementLimited) {
+                    scanLimited = YES;
+                    limitedMeasurements++;
+                }
+                BOOL cacheKnown = cacheState != WQCacheMeasurementLimited;
+                BOOL tempKnown = tempState != WQCacheMeasurementLimited;
+                if (cacheKnown && tempKnown && cacheBytes + tempBytes < 64 * 1024) continue;
                 WQCacheItem *item = [WQCacheItem new];
-                NSString *bid = wq_container_label(c);
+                NSString *bid = granted ? wq_container_label(c) : nil;
                 item.bundleID = bid;
                 item.name = wq_display_name(bid) ?: bid ?: c.lastPathComponent;
                 item.targets = @[caches, tmp];
                 item.cacheBytes = cacheBytes;
                 item.tempBytes = tempBytes;
+                item.cacheKnown = cacheKnown;
+                item.tempKnown = tempKnown;
+                item.limited = !cacheKnown || !tempKnown;
                 item.selected = YES;
                 [items addObject:item];
             }
         }
         if (cancellation.isCancelled) return;
-        unsigned long long crash = wq_dir_size(kCrashLogsPath);
-        if (crash > 0) {
+        unsigned long long crash = 0;
+        WQCacheMeasurementState crashState = WQCacheMeasureDirectory(kCrashLogsPath, cancellation, &crash);
+        if (crashState == WQCacheMeasurementCancelled) return;
+        if (crashState == WQCacheMeasurementLimited) {
+            scanLimited = YES;
+            limitedMeasurements++;
+        }
+        if (crashState == WQCacheMeasurementLimited || crash > 0) {
             WQCacheItem *logs = [WQCacheItem new];
             logs.name = @"Crash Logs";
             logs.targets = @[kCrashLogsPath];
             logs.cacheBytes = crash;
+            logs.cacheKnown = crashState != WQCacheMeasurementLimited;
+            logs.crashLogs = YES;
+            logs.limited = crashState == WQCacheMeasurementLimited;
             logs.selected = YES;
             [items addObject:logs];
         }
         [items sortUsingComparator:^NSComparisonResult(WQCacheItem *a, WQCacheItem *b) {
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
+        NSMutableArray<NSString *> *notes = [NSMutableArray new];
+        if (failedEnumerations) {
+            [notes addObject:[NSString stringWithFormat:@"%lu container enumeration%@ failed",
+                              (unsigned long)failedEnumerations, failedEnumerations == 1 ? @"" : @"s"]];
+        }
+        if (limitedContainers) {
+            [notes addObject:[NSString stringWithFormat:@"%lu container%@ had limited access",
+                              (unsigned long)limitedContainers, limitedContainers == 1 ? @"" : @"s"]];
+        }
+        if (limitedMeasurements) {
+            [notes addObject:[NSString stringWithFormat:@"%lu cache tree measurement%@ was limited",
+                              (unsigned long)limitedMeasurements, limitedMeasurements == 1 ? @"" : @"s"]];
+        }
+        NSString *note = nil;
+        if (scanLimited) {
+            [notes addObject:@"cleaning is disabled until a complete scan succeeds"];
+            note = [NSString stringWithFormat:@"Scan incomplete: %@. See Log.", [notes componentsJoinedByString:@"; "]];
+        } else if (emptyRoots.count) {
+            note = [NSString stringWithFormat:@"No %@ container%@ found.",
+                    [emptyRoots componentsJoinedByString:@" or "], emptyRoots.count == 1 ? @"" : @"s"];
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != self->_scanGeneration || cancellation.isCancelled) return;
             self->_items = items;
             self->_scanning = NO;
-            self->_status = nil;
+            self->_scanLimited = scanLimited;
+            self->_status = note;
             [self.tableView reloadData];
             [self updateButtons];
         });
@@ -349,9 +479,14 @@ static NSString *const kCrashLogsPath =
         ?: [[WQCleanerCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"item"];
     WQCacheItem *item = self.visibleItems[(NSUInteger)indexPath.row];
     cell.nameLabel.text = item.name;
-    cell.detailLabel.text = item.bundleID
-        ? [NSString stringWithFormat:@"cache %@ · temp %@", wq_size_text(item.cacheBytes), wq_size_text(item.tempBytes)]
-        : @"osanalytics";
+    if (item.crashLogs) {
+        cell.detailLabel.text = item.cacheKnown ? @"Crash Logs · osanalytics" : @"Crash Logs · access limited";
+    } else {
+        NSString *cache = item.cacheKnown ? wq_size_text(item.cacheBytes) : @"unknown";
+        NSString *temp = item.tempKnown ? wq_size_text(item.tempBytes) : @"unknown";
+        cell.detailLabel.text = [NSString stringWithFormat:@"cache %@ · temp %@%@", cache, temp,
+                                 item.limited ? @" · access limited" : @""];
+    }
     cell.sizeLabel.text = wq_size_text(item.bytes);
     cell.iconView.image = wq_app_icon(item.bundleID)
         ?: [UIImage systemImageNamed:item.bundleID ? @"app.dashed" : @"exclamationmark.triangle"];
@@ -468,4 +603,3 @@ static NSString *const kCrashLogsPath =
 }
 
 @end
-
