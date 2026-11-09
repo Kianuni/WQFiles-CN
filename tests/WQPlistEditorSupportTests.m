@@ -49,11 +49,46 @@ static void TestPreviewAndSerializedLimits(void)
     WQCheck(!WQPSerializedDataWithinLimit(overLimit));
 }
 
+static void TestKeyedArchiveUIDs(void)
+{
+    NSData *archive = [NSKeyedArchiver archivedDataWithRootObject:@{ @"a": @"b" }
+                                            requiringSecureCoding:NO error:nil];
+    WQCheck(archive.length > 0);
+    NSPropertyListFormat format = 0;
+    NSError *error = nil;
+    id plist = [NSPropertyListSerialization propertyListWithData:archive
+                                                         options:NSPropertyListMutableContainersAndLeaves
+                                                          format:&format error:&error];
+    WQCheck([plist isKindOfClass:NSDictionary.class]);
+    id uid = plist[@"$top"][@"root"];
+    WQCheck(uid != nil);
+    WQCheck(WQPlistIsKeyedArchiveUID(uid));
+    WQCheck(!WQPlistIsKeyedArchiveUID(@"plain string"));
+    WQCheck(!WQPlistIsKeyedArchiveUID(@1));
+
+    NSString *copyError = nil;
+    id copy = WQPlistImmutableCopy(plist, &copyError);
+    WQCheck(copy != nil && copyError == nil);
+    NSData *encoded = copy ? [NSPropertyListSerialization dataWithPropertyList:copy
+                                                                        format:NSPropertyListBinaryFormat_v1_0
+                                                                       options:0 error:&error] : nil;
+    WQCheck(encoded.length > 0);
+    if (encoded) {
+        id unarchived = [NSKeyedUnarchiver unarchivedObjectOfClass:NSDictionary.class
+                                                          fromData:encoded error:&error];
+        WQCheck([unarchived isEqual:@{ @"a": @"b" }]);
+    }
+
+    copyError = nil;
+    WQCheck(WQPlistImmutableCopy([NSNull null], &copyError) == nil && copyError.length > 0);
+}
+
 int main(void)
 {
     @autoreleasepool {
         TestInputLimits();
         TestPreviewAndSerializedLimits();
+        TestKeyedArchiveUIDs();
         if (failures) {
             fprintf(stderr, "%d plist support regression check(s) failed\n", failures);
             return 1;

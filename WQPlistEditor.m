@@ -13,7 +13,7 @@
 
 typedef NS_ENUM(NSInteger, WQPType) {
     WQPTypeString, WQPTypeInteger, WQPTypeReal, WQPTypeBoolean, WQPTypeDate, WQPTypeData,
-    WQPTypeDictionary, WQPTypeArray, WQPTypeUnknown,
+    WQPTypeDictionary, WQPTypeArray, WQPTypeUID, WQPTypeUnknown,
 };
 
 static WQPType wqp_type(id v)
@@ -27,6 +27,7 @@ static WQPType wqp_type(id v)
     if ([v isKindOfClass:NSData.class]) return WQPTypeData;
     if ([v isKindOfClass:NSDictionary.class]) return WQPTypeDictionary;
     if ([v isKindOfClass:NSArray.class]) return WQPTypeArray;
+    if (WQPlistIsKeyedArchiveUID(v)) return WQPTypeUID;
     return WQPTypeUnknown;
 }
 
@@ -41,6 +42,7 @@ static NSString *wqp_type_name(WQPType t)
         case WQPTypeData: return @"Data";
         case WQPTypeDictionary: return @"Dictionary";
         case WQPTypeArray: return @"Array";
+        case WQPTypeUID: return @"Reference";
         case WQPTypeUnknown: return @"?";
     }
     return @"?";
@@ -74,8 +76,18 @@ static NSString *wqp_summary(id v)
         case WQPTypeData: return [NSString stringWithFormat:@"%lu bytes · %@", (unsigned long)[v length], wqp_hex(v, 24)];
         case WQPTypeDictionary: return [NSString stringWithFormat:@"%lu keys", (unsigned long)[v count]];
         case WQPTypeArray: return [NSString stringWithFormat:@"%lu items", (unsigned long)[v count]];
+        case WQPTypeUID: return @"keyed-archive reference";
         case WQPTypeUnknown: return WQPBoundedStringPreview([v description]);
     }
+    return @"";
+}
+
+static NSString *wqp_scalar_text(id value, WQPType t)
+{
+    if (t == WQPTypeData) return wqp_hex(value, WQPMaxDataBytes);
+    if (t == WQPTypeDate) return [wqp_dates() stringFromDate:value];
+    if ([value isKindOfClass:NSString.class]) return value;
+    if ([value isKindOfClass:NSNumber.class]) return [value stringValue];
     return @"";
 }
 
@@ -90,49 +102,10 @@ static id wqp_default(WQPType t)
         case WQPTypeData: return [NSData data];
         case WQPTypeDictionary: return [NSMutableDictionary dictionary];
         case WQPTypeArray: return [NSMutableArray array];
+        case WQPTypeUID: return @"";
         case WQPTypeUnknown: return @"";
     }
     return @"";
-}
-
-// The editor's containers are mutated only on the main thread. Save marks the
-// shared edit state as saving before this runs, which freezes every UI
-// mutation route while this recursive immutable copy is made off-main.
-static id wqp_immutable_plist_copy(id value)
-{
-    switch (wqp_type(value)) {
-        case WQPTypeDictionary: {
-            NSDictionary *source = value;
-            NSMutableDictionary *copy = [NSMutableDictionary dictionaryWithCapacity:source.count];
-            for (id key in source) {
-                if (![key isKindOfClass:NSString.class]) return nil;
-                id child = wqp_immutable_plist_copy(source[key]);
-                if (!child) return nil;
-                copy[key] = child;
-            }
-            return [copy copy];
-        }
-        case WQPTypeArray: {
-            NSArray *source = value;
-            NSMutableArray *copy = [NSMutableArray arrayWithCapacity:source.count];
-            for (id childValue in source) {
-                id child = wqp_immutable_plist_copy(childValue);
-                if (!child) return nil;
-                [copy addObject:child];
-            }
-            return [copy copy];
-        }
-        case WQPTypeString:
-        case WQPTypeInteger:
-        case WQPTypeReal:
-        case WQPTypeBoolean:
-        case WQPTypeDate:
-        case WQPTypeData:
-            return [value copy];
-        case WQPTypeUnknown:
-            return nil;
-    }
-    return nil;
 }
 
 static void wqp_alert(UIViewController *host, NSString *title, NSString *message)
@@ -394,13 +367,14 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
             NSString *writeError = nil;
             BOOL ok = NO;
             NSDictionary *savedVersion = nil;
-            id snapshot = wqp_immutable_plist_copy(root);
+            NSString *copyError = nil;
+            id snapshot = WQPlistImmutableCopy(root, &copyError);
             NSData *data = snapshot ? [NSPropertyListSerialization dataWithPropertyList:snapshot
                                                                                      format:format
                                                                                     options:0
                                                                                       error:&serializationError] : nil;
             if (!snapshot) {
-                writeError = @"The edited property list contains an unsupported value.";
+                writeError = copyError ?: @"The edited property list contains an unsupported value.";
             } else if (!data) {
                 writeError = serializationError.localizedDescription ?: @"The edited property list is not valid.";
             } else if (!WQPSerializedDataWithinLimit(data)) {
@@ -539,6 +513,10 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
         [self.navigationController pushViewController:child animated:YES];
         return;
     }
+    if (t == WQPTypeUID) {
+        wqp_alert(self, @"Reference value", @"Keyed-archive references are read-only in this editor. Edit the archived data through its owning key instead.");
+        return;
+    }
     if (t == WQPTypeBoolean || self.doc.readOnly || self.doc.edit.saving) return;
     NSInteger row = indexPath.row;
     [self editValueOfType:t current:value title:name done:^(id newValue) {
@@ -551,6 +529,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 - (void)editValueOfType:(WQPType)t current:(id)current title:(NSString *)title done:(void (^)(id value))done
 {
     if (self.doc.readOnly || self.doc.edit.saving) return;
+    if (t == WQPTypeUID) return;
     if (t == WQPTypeData && [current length] > WQPMaxDataBytes) {
         wqp_alert(self, @"Too large to edit here", @"Data over 4 KB can't be edited in this editor.");
         return;
@@ -571,8 +550,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
                                                                 message:[wqp_type_name(t) stringByAppendingString:hint ? [@" · " stringByAppendingString:hint] : @""]
                                                          preferredStyle:UIAlertControllerStyleAlert];
     [a addTextFieldWithConfigurationHandler:^(UITextField *f) {
-        f.text = t == WQPTypeData ? wqp_hex(current, WQPMaxDataBytes) : (t == WQPTypeDate ? [wqp_dates() stringFromDate:current]
-                                                                              : ([current isKindOfClass:NSString.class] ? current : [current stringValue]));
+        f.text = wqp_scalar_text(current, t);
         f.autocapitalizationType = UITextAutocapitalizationTypeNone;
         f.autocorrectionType = UITextAutocorrectionTypeNo;
         f.clearButtonMode = UITextFieldViewModeAlways;
