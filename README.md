@@ -111,6 +111,26 @@ https://raw.githubusercontent.com/kolbicz/WQFiles/main/source.json
 
 Or download `WQFiles.ipa` from [Releases](https://github.com/kolbicz/WQFiles/releases) and sign it yourself.
 
+## Signing: the App Group
+
+WQ Files needs an **App Group** to work: worse_query asks for access through
+your app's group container. Whatever signs the IPA must give it one. The app
+uses whichever group it receives, so the group name doesn't matter. The top
+of **Log** shows the group it got, or "No App Group" when it got none.
+
+- **AltStore, SideStore or Sideloadly with your Apple ID** (free or paid):
+  they create the App Group automatically. This is the easiest way.
+- **Feather, ESign and similar tools with a certificate (.p12) and a
+  provisioning profile:** the profile has to contain an App Group. Wildcard
+  profiles (App ID `*`), which most certificate sellers provide, can't contain
+  one, so signing fails with an entitlement error, or the app reports "No App
+  Group".
+- **Your own developer account:** in the Apple Developer portal create an App
+  Group (Identifiers → App Groups), create an explicit App ID with the **App
+  Groups** capability and that group assigned, then create a provisioning
+  profile for that App ID. Sign the IPA with that profile, keeping the App
+  Group entitlement.
+
 ## Build and signing
 
 `./build.sh` compiles an arm64 binary and ad-hoc signs it with an App Group
