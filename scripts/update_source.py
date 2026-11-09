@@ -67,11 +67,13 @@ def read_ipa_metadata(ipa: os.PathLike[str] | str) -> Dict[str, str]:
         with zipfile.ZipFile(ipa_path) as zf:
             info_member = _member(zf, EXPECTED_INFO_PATH)
             executable_member = _member(zf, EXPECTED_EXECUTABLE_PATH)
+            if info_member.file_size > 1024 * 1024:
+                raise ValueError("embedded Info.plist is unreasonably large")
             if executable_member.file_size == 0:
                 raise ValueError("IPA executable is empty")
             try:
                 info = plistlib.loads(zf.read(info_member))
-            except (OSError, plistlib.InvalidFileException) as exc:
+            except Exception as exc:
                 raise ValueError(f"invalid embedded Info.plist: {exc}") from exc
     except zipfile.BadZipFile as exc:
         raise ValueError(f"invalid IPA ZIP: {exc}") from exc
@@ -191,6 +193,12 @@ def update_catalog(
             f"IPA build does not match the requested build: {artifact['build']} != {build}"
         )
 
+    existing = next((v for v in app["versions"]
+                     if isinstance(v, dict) and v.get("version") == version), None)
+    if not notes and isinstance(existing, dict):
+        old_notes = existing.get("localizedDescription")
+        if isinstance(old_notes, str):
+            notes = old_notes
     entry = {
         "version": artifact["version"],
         "buildVersion": artifact["build"],
@@ -201,7 +209,8 @@ def update_catalog(
         # This is deliberately taken from the IPA, never from the old entry.
         "minOSVersion": artifact["minimum_os"],
     }
-    app["versions"] = [entry] + [v for v in app["versions"] if v.get("version") != version]
+    app["versions"] = [entry] + [v for v in app["versions"]
+                                 if not (isinstance(v, dict) and v.get("version") == version)]
     _write_source_atomically(source_path, source)
     return entry
 
@@ -215,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     notes = args[3] if len(args) > 3 else ""
     try:
         entry = update_catalog(SOURCE, version, build, ipa, notes)
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+    except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"source.json: {entry['version']} ({entry['buildVersion']}), {entry['size']} bytes")

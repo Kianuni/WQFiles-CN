@@ -119,6 +119,31 @@ class UpdateSourceTests(unittest.TestCase):
                     UPDATE_SOURCE.update_catalog(source, "0.5", "5", ipa)
                 self.assertEqual(source.read_bytes(), original)
 
+    def test_existing_description_is_preserved_when_notes_are_omitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.json"
+            ipa = root / "WQFiles.ipa"
+            write_source(source)
+            catalog = json.loads(source.read_text(encoding="utf-8"))
+            catalog["apps"][0]["versions"][0]["version"] = "0.5"
+            catalog["apps"][0]["versions"][0]["buildVersion"] = "5"
+            catalog["apps"][0]["versions"][0]["localizedDescription"] = "keep this text"
+            source.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+            write_ipa(ipa)
+            entry = UPDATE_SOURCE.update_catalog(source, "0.5", "5", ipa, "")
+            self.assertEqual(entry["localizedDescription"], "keep this text")
+
+    def test_malformed_xml_info_plist_is_a_clean_value_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ipa = root / "WQFiles.ipa"
+            with zipfile.ZipFile(ipa, "w") as archive:
+                archive.writestr("Payload/WQFiles.app/Info.plist", b"<plist><dict>")
+                archive.writestr("Payload/WQFiles.app/WQFiles", b"executable")
+            with self.assertRaises(ValueError):
+                UPDATE_SOURCE.read_ipa_metadata(ipa)
+
     def test_missing_ipa_is_rejected_before_catalog_write(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
