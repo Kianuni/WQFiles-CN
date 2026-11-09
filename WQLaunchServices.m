@@ -29,7 +29,6 @@ static const uint32_t kWQLSMaxStringID = 0x01000000u;
 static const NSUInteger kWQLSMaxBundleRecords = 100000;
 static const NSUInteger kWQLSMaxDecodedStrings = 200000;
 static const NSUInteger kWQLSMaxDecodedStringBytes = 8u * 1024u * 1024u;
-static const NSTimeInterval kWQLSDiscoveryInterval = 2.0;
 
 static NSObject *wq_ls_lock(void)
 {
@@ -311,7 +310,6 @@ static NSDictionary *gLSStoreSignature;
 static BOOL gLSLoaded;
 static NSUInteger gLSFailureCount;
 static NSTimeInterval gLSNextRetryAt;
-static NSTimeInterval gLSNextDiscoveryAt;
 
 static void wq_ls_clear_snapshot_if_changed(BOOL changed)
 {
@@ -329,7 +327,6 @@ static void wq_ls_note_failure(NSTimeInterval now, NSString *reason)
     NSUInteger shift = gLSFailureCount > 1 ? gLSFailureCount - 1 : 0;
     NSTimeInterval delay = (NSTimeInterval)(1u << MIN(shift, (NSUInteger)5));
     gLSNextRetryAt = now + delay;
-    gLSNextDiscoveryAt = gLSNextRetryAt;
     if (reason) wq_log(@"names: %@; retrying in %.0f s", reason, delay);
 }
 
@@ -342,7 +339,7 @@ static void wq_load_ls_names_locked(void)
         if (wq_ls_candidate_info(gLSStorePath, &current)) {
             NSDictionary *signature = wq_ls_signature(&current);
             currentChanged = !wq_ls_signature_equal(signature, gLSStoreSignature);
-            if (!currentChanged && now < gLSNextDiscoveryAt) return;
+            if (!currentChanged) return;
         } else {
             currentChanged = YES;
         }
@@ -350,7 +347,6 @@ static void wq_load_ls_names_locked(void)
         return;
     }
 
-    if (!currentChanged && !gLSLoaded && now < gLSNextRetryAt) return;
     NSString *path = wq_find_ls_store();
     if (!path) {
         wq_ls_clear_snapshot_if_changed(currentChanged);
@@ -371,7 +367,6 @@ static void wq_load_ls_names_locked(void)
         wq_ls_signature_equal(beforeSignature, gLSStoreSignature)) {
         gLSFailureCount = 0;
         gLSNextRetryAt = 0;
-        gLSNextDiscoveryAt = now + kWQLSDiscoveryInterval;
         return;
     }
 
@@ -407,7 +402,6 @@ static void wq_load_ls_names_locked(void)
     gLSLoaded = YES;
     gLSFailureCount = 0;
     gLSNextRetryAt = 0;
-    gLSNextDiscoveryAt = now + kWQLSDiscoveryInterval;
     [NSUserDefaults.standardUserDefaults setObject:gLSStorePath forKey:kWQLSStoreKey];
 }
 
