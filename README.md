@@ -24,9 +24,11 @@ the way KAMUI does it.
 
 ## Tools
 
-- **Apps**: every app with its data size. Back up an app's data, restore the
-  latest backup, clear its data (Documents, Library, tmp), open its folder, or
-  share a backup as a ZIP over AirDrop, Files, Mail and so on.
+- **Apps**: every app with its data size. Back up an app's **Documents and
+  Library**, restore the latest backup, clear its data (Documents, Library,
+  and tmp), open its folder, or share a backup as a ZIP over AirDrop, Files,
+  Mail and so on. `tmp` is intentionally ephemeral: clear removes it, but app
+  backups do not include it and restore leaves the current `tmp` untouched.
 - **Cache Cleaner**: cache and temp size per app, with search, Select All /
   None / Large Caches (50 MB+) and crash logs. Long-press an app to jump to its
   Caches, tmp or data folder.
@@ -55,8 +57,11 @@ Before a file is overwritten or deleted, its contents are copied to
 **Backups** inside the app (also reachable in the Files app). Long-press a
 backup to restore it to its original location. In the file browser only empty
 folders can be deleted. Clearing an app's data and cleaning caches delete
-without a file-by-file backup; Apps offers to back up first. The app changes
-nothing on its own; every write is an action you take.
+without a file-by-file backup; Apps offers to back up Documents and Library
+first, while `tmp` is discarded and cannot be restored. Close the target app
+before backup, restore, or clear. The operations verify their copy/purge
+postconditions, but they are not filesystem snapshots if the target app keeps
+running. The app changes nothing on its own; every write is an action you take.
 
 Editing another app's or the system's files can break things. Keep the backups
 and only change what you understand.
