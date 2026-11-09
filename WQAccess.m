@@ -314,6 +314,7 @@ BOOL wq_is_backup_storage_path(NSString *path)
 }
 
 static int wq_open(NSString *path, int flags, mode_t mode);
+static int wq_open_directory_flags(NSString *path, int flags);
 
 // Copies everything from fd `in` to fd `out` in chunks; fsyncs `out`.
 static BOOL wq_stream(int in, int out, NSString **errorText)
@@ -784,13 +785,33 @@ BOOL wq_create_file_from(NSString *path, NSString *source, NSString **errorText)
         if (errorText) *errorText = @"Backup storage cannot be modified through the file browser.";
         return NO;
     }
+    NSString *canonical = WQCanonicalVarPath(path);
+    if (!WQAbsolutePathGrammar(canonical)) {
+        if (errorText) *errorText = @"Invalid file path";
+        return NO;
+    }
     int in = WQOpenRegularAt(AT_FDCWD, source.fileSystemRepresentation, O_RDONLY, 0);
     if (in < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
-    int fd = wq_open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (fd < 0) { if (errorText) *errorText = wq_errno(errno); close(in); return NO; }
+    NSString *parentPath = path.stringByDeletingLastPathComponent;
+    int parent = wq_open_directory_flags(parentPath, O_SEARCH);
+    if (parent < 0) {
+        if (errorText) *errorText = wq_errno(errno);
+        close(in);
+        return NO;
+    }
+    const char *name = path.lastPathComponent.fileSystemRepresentation;
+    int fd = WQOpenRegularAt(parent, name, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0 && wq_is_denied(errno) && wq_grant(parentPath))
+        fd = WQOpenRegularAt(parent, name, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) {
+        if (errorText) *errorText = wq_errno(errno);
+        close(parent); close(in);
+        return NO;
+    }
     struct stat srcBefore = {0};
     if (fstat(in, &srcBefore) != 0) {
-        close(fd); close(in); unlink(path.fileSystemRepresentation);
+        close(fd); close(in); close(parent);
+        unlinkat(parent, name, 0);
         if (errorText) *errorText = @"Cannot inspect the copy source";
         return NO;
     }
@@ -806,7 +827,9 @@ BOOL wq_create_file_from(NSString *path, NSString *source, NSString **errorText)
     }
     close(in);
     if (close(fd) != 0 && ok) { ok = NO; error = wq_errno(errno); }
-    if (!ok) unlink(path.fileSystemRepresentation);
+    if (ok && fsync(parent) != 0) { ok = NO; error = wq_errno(errno); }
+    if (!ok) unlinkat(parent, name, 0);
+    close(parent);
     wq_log(@"create: %@ from %@ -> %@", path, source.lastPathComponent, ok ? @"OK" : error);
     if (!ok && errorText) *errorText = error;
     return ok;
@@ -943,21 +966,46 @@ BOOL wq_patch(NSString *path, NSDictionary<NSNumber *, NSData *> *runs, NSString
     return wq_patch_if_unchanged(path, runs, nil, errorText);
 }
 
+static int wq_open_directory_flags(NSString *path, int flags)
+{
+    int fd = WQOpenDirectoryNoLinksFlags(path, flags);
+    if (fd < 0 && wq_is_denied(errno) && wq_grant(path)) fd = WQOpenDirectoryNoLinksFlags(path, flags);
+    return fd;
+}
+
+static int wq_open_directory(NSString *path)
+{
+    return wq_open_directory_flags(path, O_RDONLY);
+}
+
 BOOL wq_create_file(NSString *path, NSData *data, NSString **errorText)
 {
     if (wq_is_backup_storage_path(path)) {
         if (errorText) *errorText = @"Backup storage cannot be modified through the file browser.";
         return NO;
     }
-    int fd = wq_open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path))) {
+        if (errorText) *errorText = @"Invalid file path";
+        return NO;
+    }
+    NSString *parentPath = path.stringByDeletingLastPathComponent;
+    int parent = wq_open_directory_flags(parentPath, O_SEARCH);
+    if (parent < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    const char *name = path.lastPathComponent.fileSystemRepresentation;
+    int fd = WQOpenRegularAt(parent, name, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0 && wq_is_denied(errno) && wq_grant(parentPath))
+        fd = WQOpenRegularAt(parent, name, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) {
         if (errorText) *errorText = wq_errno(errno);
+        close(parent);
         return NO;
     }
     BOOL ok = wq_write_all(fd, data);
     int err = errno;
     ok = wq_finish_fd(fd, ok, &err);
-    if (!ok) unlink(path.fileSystemRepresentation);
+    if (ok && fsync(parent) != 0) { ok = NO; err = errno; }
+    if (!ok) unlinkat(parent, name, 0);
+    close(parent);
     wq_log(@"create: %@ (%lu bytes) -> %@", path, (unsigned long)data.length, ok ? @"OK" : wq_errno(err));
     if (!ok && errorText) *errorText = wq_errno(err);
     return ok;
@@ -969,10 +1017,20 @@ BOOL wq_create_dir(NSString *path, NSString **errorText)
         if (errorText) *errorText = @"Backup storage cannot be modified through the file browser.";
         return NO;
     }
-    int rc = mkdir(path.fileSystemRepresentation, 0755);
-    if (rc != 0 && wq_is_denied(errno) && wq_grant(path.stringByDeletingLastPathComponent))
-        rc = mkdir(path.fileSystemRepresentation, 0755);
+    if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path))) {
+        if (errorText) *errorText = @"Invalid folder path";
+        return NO;
+    }
+    NSString *parentPath = path.stringByDeletingLastPathComponent;
+    int parent = wq_open_directory_flags(parentPath, O_SEARCH);
+    if (parent < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    const char *name = path.lastPathComponent.fileSystemRepresentation;
+    int rc = mkdirat(parent, name, 0755);
+    if (rc != 0 && wq_is_denied(errno) && wq_grant(parentPath))
+        rc = mkdirat(parent, name, 0755);
     int err = errno;
+    if (rc == 0 && fsync(parent) != 0) { rc = -1; err = errno; }
+    close(parent);
     wq_log(@"mkdir: %@ -> %@", path, rc == 0 ? @"OK" : wq_errno(err));
     if (rc != 0 && errorText) *errorText = wq_errno(err);
     return rc == 0;
@@ -984,50 +1042,44 @@ BOOL wq_delete(NSString *path, NSString **errorText)
         if (errorText) *errorText = @"Backup storage cannot be overwritten or deleted through the file browser.";
         return NO;
     }
-    struct stat st;
-    if (!wq_stat(path, &st)) {
-        if (errorText) *errorText = @"Not found";
+    if (!WQAbsolutePathGrammar(WQCanonicalVarPath(path))) {
+        if (errorText) *errorText = @"Invalid file path";
         return NO;
     }
-    int rc;
-    if (S_ISDIR(st.st_mode)) {
-        rc = rmdir(path.fileSystemRepresentation);
-        if (rc != 0 && wq_is_denied(errno) && wq_grant(path.stringByDeletingLastPathComponent))
-            rc = rmdir(path.fileSystemRepresentation);
-    } else {
-        if (S_ISREG(st.st_mode)) {
-            WQMutation mutation;
-            if (!wq_mutation_open(path, wq_version_for_stat(&st), &mutation, O_RDONLY, errorText)) return NO;
-            NSString *backup = nil;
-            if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { wq_mutation_close(&mutation); return NO; }
-            // unlinkat remains conditional only on this final check, not atomic
-            // against an uncooperative directory-entry replacement.
-            rc = unlinkat(mutation.parent, path.lastPathComponent.fileSystemRepresentation, 0);
-            int err = errno;
-            wq_mutation_close(&mutation);
-            if (rc != 0 && errorText) *errorText = wq_errno(err);
-            return rc == 0;
-        }
-        rc = unlink(path.fileSystemRepresentation);
-        if (rc != 0 && wq_is_denied(errno) && wq_grant(path.stringByDeletingLastPathComponent))
-            rc = unlink(path.fileSystemRepresentation);
+    NSString *parentPath = path.stringByDeletingLastPathComponent;
+    int parent = wq_open_directory_flags(parentPath, O_SEARCH);
+    if (parent < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    const char *name = path.lastPathComponent.fileSystemRepresentation;
+    struct stat st;
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0 &&
+        !(wq_is_denied(errno) && wq_grant(parentPath) &&
+          fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == 0)) {
+        if (errorText) *errorText = errno == ENOENT ? @"Not found" : wq_errno(errno);
+        close(parent);
+        return NO;
     }
+    if (S_ISREG(st.st_mode)) {
+        close(parent);
+        WQMutation mutation;
+        if (!wq_mutation_open(path, wq_version_for_stat(&st), &mutation, O_RDONLY, errorText)) return NO;
+        NSString *backup = nil;
+        if (!wq_mutation_backup(path, &mutation, &backup, errorText)) { wq_mutation_close(&mutation); return NO; }
+        int rc = unlinkat(mutation.parent, name, 0);
+        int err = errno;
+        wq_mutation_close(&mutation);
+        if (rc != 0 && errorText) *errorText = wq_errno(err);
+        wq_log(@"delete: %@ -> %@", path, rc == 0 ? @"OK" : wq_errno(err));
+        return rc == 0;
+    }
+    int flags = S_ISDIR(st.st_mode) ? AT_REMOVEDIR : 0;
+    int rc = unlinkat(parent, name, flags);
+    if (rc != 0 && wq_is_denied(errno) && wq_grant(parentPath))
+        rc = unlinkat(parent, name, flags);
     int err = errno;
+    close(parent);
     wq_log(@"delete: %@ -> %@", path, rc == 0 ? @"OK" : wq_errno(err));
     if (rc != 0 && errorText) *errorText = err == ENOTEMPTY ? @"Only empty folders can be deleted" : wq_errno(err);
     return rc == 0;
-}
-
-static int wq_open_directory_flags(NSString *path, int flags)
-{
-    int fd = WQOpenDirectoryNoLinksFlags(path, flags);
-    if (fd < 0 && wq_is_denied(errno) && wq_grant(path)) fd = WQOpenDirectoryNoLinksFlags(path, flags);
-    return fd;
-}
-
-static int wq_open_directory(NSString *path)
-{
-    return wq_open_directory_flags(path, O_RDONLY);
 }
 
 BOOL wq_rename(NSString *path, NSString *newName, NSString **errorText)

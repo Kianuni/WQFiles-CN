@@ -213,6 +213,40 @@ int main(void)
                 check(!ok && savedVersion == nil && has(file, @"external"), @"post-write interference is not adopted or rolled back over");
                 wq_test_mutation_hook = nil;
             }
+            NSString *created = [base stringByAppendingPathComponent:@"created"];
+            check(wq_create_file(created, bytes(@"created"), &error) && has(created, @"created"), @"create_file succeeds through a parent descriptor");
+            NSString *createdFrom = [base stringByAppendingPathComponent:@"created-from"];
+            check(wq_create_file_from(createdFrom, streamSource, &error) && has(createdFrom, @"source changed while streaming"),
+                  @"create_file_from succeeds when the source is stable");
+            NSString *newDir = [base stringByAppendingPathComponent:@"new-dir"];
+            check(wq_create_dir(newDir, &error) && [fm fileExistsAtPath:newDir], @"create_dir succeeds through a parent descriptor");
+            put([newDir stringByAppendingPathComponent:@"child"], @"child");
+            check(!wq_delete(newDir, &error), @"non-empty folder delete refused");
+            check(wq_delete([newDir stringByAppendingPathComponent:@"child"], &error) && wq_delete(newDir, &error),
+                  @"empty folder delete succeeds");
+            NSString *realDir = [base stringByAppendingPathComponent:@"real-dir"];
+            check(wq_create_dir(realDir, &error), @"create real directory fixture");
+            NSString *linkDir = [base stringByAppendingPathComponent:@"link-dir"];
+            check(symlink(realDir.fileSystemRepresentation, linkDir.fileSystemRepresentation) == 0, @"create symlinked parent fixture");
+            check(!wq_create_file([linkDir stringByAppendingPathComponent:@"escaped"], bytes(@"x"), &error) &&
+                  ![fm fileExistsAtPath:[realDir stringByAppendingPathComponent:@"escaped"]],
+                  @"create_file refuses a symlinked parent");
+            check(!wq_create_dir([linkDir stringByAppendingPathComponent:@"escaped-dir"], &error) &&
+                  ![fm fileExistsAtPath:[realDir stringByAppendingPathComponent:@"escaped-dir"]],
+                  @"create_dir refuses a symlinked parent");
+            check(!wq_create_file([base stringByAppendingPathComponent:@"../escaped"], bytes(@"x"), &error),
+                  @"create_file rejects traversal grammar");
+            check(!wq_delete([base stringByAppendingPathComponent:@"../escaped"], &error),
+                  @"delete rejects traversal grammar");
+            NSString *targetDir = [base stringByAppendingPathComponent:@"symlink-target"];
+            check(wq_create_dir(targetDir, &error), @"create symlink target directory");
+            NSString *targetFile = [targetDir stringByAppendingPathComponent:@"target-file"];
+            check(wq_create_file(targetFile, bytes(@"target"), &error), @"create symlink target file");
+            NSString *dirLink = [base stringByAppendingPathComponent:@"dir-link"];
+            check(symlink(targetDir.fileSystemRepresentation, dirLink.fileSystemRepresentation) == 0, @"create directory symlink");
+            check(wq_delete(dirLink, &error) && [fm fileExistsAtPath:targetDir] && [fm fileExistsAtPath:targetFile],
+                  @"deleting a directory symlink removes only the link");
+
             check(wq_enumerate([base stringByAppendingPathComponent:@"absent"], 1, nil, nil) == nil, @"missing enumeration base is failure, not empty success");
             wq_test_volume_limit = 0;
             check(wq_enumerate(base, 0, nil, nil) == nil, @"unavailable inode probe is failure, not silent fixed-range success");
