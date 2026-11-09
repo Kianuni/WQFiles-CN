@@ -61,6 +61,16 @@ nothing on its own; every write is an action you take.
 Editing another app's or the system's files can break things. Keep the backups
 and only change what you understand.
 
+## Install with AltStore or SideStore
+
+Add this source to get WQ Files and its updates:
+
+```
+https://raw.githubusercontent.com/kolbicz/WQFiles/main/source.json
+```
+
+Or download `WQFiles.ipa` from [Releases](https://github.com/kolbicz/WQFiles/releases) and sign it yourself.
+
 ## Build and signing
 
 `./build.sh` compiles an arm64 binary and ad-hoc signs it with an App Group
