@@ -36,6 +36,15 @@ int main(void)
             check([fm fileExistsAtPath:[library stringByAppendingPathComponent:@".wq-caches-preserved/nested/sentinel"]], @"conflict retains preserved original");
             check(unlinkat(fd, "Caches", AT_REMOVEDIR) == 0 && WQCacheSwapRecover(fd), @"recover after fixture conflict removed");
             check(WQCacheSwapRecover(fd), @"recovery idempotent");
+            check(WQRecoverCacheSwapAtPath(library), @"normal startup requires no recovery");
+            check(![fm fileExistsAtPath:[library stringByAppendingPathComponent:@".wq-caches-lock"]], @"normal startup creates no lock or marker");
+            check(WQCacheSwapBegin(fd, @"/private/var/nonexistent-token-target"), @"begin startup recovery fixture");
+            int lock = WQOpenRegularAt(fd, ".wq-caches-lock", O_RDWR | O_CREAT, 0600);
+            check(lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0, @"hold token-operation lock");
+            check(!WQRecoverCacheSwapAtPath(library), @"startup does not interfere with an active token query");
+            close(lock);
+            check(WQRecoverCacheSwapAtPath(library) && [[NSData dataWithContentsOfFile:sentinel] isEqual:bytes], @"startup restores interrupted cache swap without a token query");
+            check(WQRecoverCacheSwapAtPath([base stringByAppendingPathComponent:@"absent"]), @"startup does not create an absent Library");
             NSString *restricted = [base stringByAppendingPathComponent:@"search-only/child"];
             check([fm createDirectoryAtPath:restricted withIntermediateDirectories:YES attributes:nil error:nil], @"create traversal fixture");
             NSString *parent = restricted.stringByDeletingLastPathComponent;

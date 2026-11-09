@@ -92,8 +92,11 @@ NSString *wq_app_group(void)
         }
         for (id candidate in groups) {
             if (![candidate isKindOfClass:NSString.class]) continue;
-            if ([NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:candidate]) {
+            NSURL *root = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:candidate];
+            if (root) {
                 group = candidate;
+                if (!WQRecoverCacheSwapAtPath([root.path stringByAppendingPathComponent:@"Library"]))
+                    wq_log(@"App-group cache recovery requires attention; preserved contents retained: %@ (%@)", root.path, wq_errno(errno));
                 break;
             }
         }

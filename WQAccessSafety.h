@@ -153,6 +153,28 @@ static inline BOOL WQCacheSwapRecover(int library)
     return fsync(library) == 0;
 }
 
+// Normal startup performs no writes. Only an existing recovery marker or saved
+// directory opens the same cross-process lock used by token issuance.
+static inline BOOL WQRecoverCacheSwapAtPath(NSString *libraryPath)
+{
+    int library = WQOpenDirectoryNoLinks(libraryPath);
+    if (library < 0) return errno == ENOENT;
+    struct stat st;
+    BOOL marker = fstatat(library, WQCacheMarker, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    int markerError = marker ? 0 : errno;
+    BOOL saved = fstatat(library, WQCacheSaved, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    int savedError = saved ? 0 : errno;
+    if ((!marker && markerError != ENOENT) || (!saved && savedError != ENOENT)) { close(library); return NO; }
+    if (!marker && !saved) { close(library); return YES; }
+    int lock = WQOpenRegularAt(library, ".wq-caches-lock", O_RDWR | O_CREAT, 0600);
+    BOOL ok = lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0 && WQCacheSwapRecover(library);
+    int error = errno;
+    if (lock >= 0) close(lock);
+    close(library);
+    if (!ok) errno = error;
+    return ok;
+}
+
 static inline BOOL WQCacheSwapBegin(int library, NSString *target)
 {
     if (!WQCacheSwapRecover(library)) return NO;
