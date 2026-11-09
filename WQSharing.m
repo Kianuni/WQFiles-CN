@@ -50,8 +50,9 @@ static BOOL wq_shareable_regular_file(NSString *path)
 {
     if (!path.length) return NO;
     struct stat st;
-    if (stat(path.fileSystemRepresentation, &st) == 0) return S_ISREG(st.st_mode);
-    if (wq_grant(path) && stat(path.fileSystemRepresentation, &st) == 0) return S_ISREG(st.st_mode);
+    // Do not follow a final symlink: wq_copy_to_local uses O_NOFOLLOW too.
+    if (lstat(path.fileSystemRepresentation, &st) == 0) return S_ISREG(st.st_mode);
+    if (wq_grant(path) && lstat(path.fileSystemRepresentation, &st) == 0) return S_ISREG(st.st_mode);
     return NO;
 }
 

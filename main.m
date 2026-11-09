@@ -32,10 +32,9 @@ static BOOL wq_regular_file_for_ui(NSString *path)
 {
     struct stat st;
     if (!wq_stat(path, &st)) return NO;
-    if (S_ISREG(st.st_mode)) return YES;
-    if (!S_ISLNK(st.st_mode)) return NO;
-    if (stat(path.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode)) return YES;
-    return wq_grant(path) && stat(path.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode);
+    // Symbolic links are deliberately not followed: the file APIs use
+    // O_NOFOLLOW and the UI must offer the same contract.
+    return S_ISREG(st.st_mode);
 }
 
 #pragma mark - Item
@@ -433,7 +432,11 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     };
     if (!wq_regular_file_for_ui(path)) {
         UIViewController *host = nav.topViewController;
-        if (host) wq_alert(host, @"Cannot open this item", @"Only regular files can be viewed.");
+        struct stat st;
+        BOOL link = wq_stat(path, &st) && S_ISLNK(st.st_mode);
+        if (host) wq_alert(host, link ? @"Symbolic link" : @"Cannot open this item",
+                           link ? @"WQ Files does not follow symbolic links for viewing, sharing or editing."
+                                : @"Only regular files can be viewed.");
         return;
     }
     if (mode != WQOpenAuto) { push(mode); return; }
@@ -681,13 +684,6 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                 item.isLink = S_ISLNK(st.st_mode);
                 item.isDir = S_ISDIR(st.st_mode);
                 item.isRegular = S_ISREG(st.st_mode);
-                if (item.isLink) {
-                    struct stat target;
-                    if (stat(item.path.fileSystemRepresentation, &target) == 0) {
-                        item.isDir = S_ISDIR(target.st_mode);
-                        item.isRegular = S_ISREG(target.st_mode);
-                    }
-                }
                 item.size = (unsigned long long)st.st_size;
                 item.mode = st.st_mode;
                 item.uid = st.st_uid;
@@ -790,13 +786,20 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return;
     WQItem *item = _items[(NSUInteger)indexPath.row];
     UIViewController *next;
+    if (item.isLink) {
+        wq_alert(self, @"Symbolic link",
+                 @"WQ Files does not follow symbolic links for viewing, sharing or editing. Use Copy Path to open the target explicitly.");
+        return;
+    }
     if (item.isDir) {
         WQDirViewController *dir = [[WQDirViewController alloc] initWithPath:item.path title:item.label ?: item.name];
         dir.readOnly = self.readOnly;
         next = dir;
     } else {
         if (!item.isRegular) {
-            wq_alert(self, @"Cannot open this item", @"Only regular files can be viewed.");
+            wq_alert(self, @"Cannot open this item", item.isLink
+                     ? @"Symbolic links are not followed for viewing, sharing or editing."
+                     : @"Only regular files can be viewed.");
             return;
         }
         wq_open_file(self.navigationController, item.path, self.readOnly, WQOpenAuto);
@@ -929,9 +932,16 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
 
 - (void)confirmDelete:(WQItem *)item
 {
-    NSString *message = item.isDir
-        ? [NSString stringWithFormat:@"%@\n\nOnly empty folders can be deleted.", item.path]
-        : [NSString stringWithFormat:@"%@\n\nA copy is kept in Backups.", item.path];
+    NSString *message;
+    if (item.isLink) {
+        message = [NSString stringWithFormat:@"%@\n\nRemoves the symbolic link only; its target is not changed.", item.path];
+    } else if (item.isDir) {
+        message = [NSString stringWithFormat:@"%@\n\nOnly empty folders can be deleted.", item.path];
+    } else if (item.isRegular) {
+        message = [NSString stringWithFormat:@"%@\n\nA copy is kept in Backups.", item.path];
+    } else {
+        message = [NSString stringWithFormat:@"%@\n\nThis special file is removed; no backup is kept.", item.path];
+    }
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Delete \"%@\"?", item.name]
                                                                    message:message
                                                             preferredStyle:UIAlertControllerStyleAlert];
