@@ -7,6 +7,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+static inline UIBarButtonItemStyle wq_primary_button_style(void)
+{
+    if (@available(iOS 26.0, *)) return UIBarButtonItemStyleProminent;
+    return UIBarButtonItemStylePlain;
+}
+
 dispatch_queue_t wq_io(void);
 void wq_alert(UIViewController *host, NSString *title, NSString *_Nullable message);
 NSString *wq_size_text(unsigned long long size);

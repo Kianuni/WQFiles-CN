@@ -9,6 +9,7 @@
 #import "WQHexViewerHelpers.h"
 #import "WQAccess.h"
 #import "WQCore.h"
+#import "WQUI.h"
 #import <sys/stat.h>
 
 static const NSUInteger kPageSize = 64 * 1024;
@@ -151,7 +152,7 @@ static void wqh_alert(UIViewController *host, NSString *title, NSString *message
     self.navigationItem.prompt = prompt;
     NSMutableArray *items = [NSMutableArray array];
     if (!_readOnly) {
-        UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithTitle:@"Save" style:UIBarButtonItemStyleDone
+        UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithTitle:@"Save" style:wq_primary_button_style()
                                                                 target:self action:@selector(save)];
         save.enabled = _edits.count > 0 && !_editState.saving;
         [items addObject:save];

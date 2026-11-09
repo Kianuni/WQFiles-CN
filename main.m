@@ -238,7 +238,7 @@ static const NSUInteger kHexLimit = 64 * 1024;
 - (void)updateEditButton
 {
     _editButton.title = _textView.editable ? @"Save" : @"Edit";
-    _editButton.style = _textView.editable ? UIBarButtonItemStyleDone : UIBarButtonItemStylePlain;
+    _editButton.style = _textView.editable ? wq_primary_button_style() : UIBarButtonItemStylePlain;
     _editButton.enabled = !_editState.saving;
 }
 

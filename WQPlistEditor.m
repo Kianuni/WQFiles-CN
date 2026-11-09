@@ -8,6 +8,7 @@
 #import "WQPlistEditor.h"
 #import "WQAccess.h"
 #import "WQCore.h"
+#import "WQUI.h"
 #import "WQPlistEditorSupport.h"
 
 typedef NS_ENUM(NSInteger, WQPType) {
@@ -275,7 +276,7 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 {
     NSMutableArray *items = [NSMutableArray array];
     if (!self.doc.readOnly && self.container) {
-        UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithTitle:@"Save" style:UIBarButtonItemStyleDone
+        UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithTitle:@"Save" style:wq_primary_button_style()
                                                                 target:self action:@selector(save)];
         save.enabled = self.doc.edit.dirty && !self.doc.edit.saving;
         [items addObject:save];

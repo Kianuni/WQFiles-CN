@@ -461,7 +461,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
     }
     NSUInteger n = 0;
     for (WQCacheItem *it in _items) if (it.selected) n++;
-    UIBarButtonItem *clean = [[UIBarButtonItem alloc] initWithTitle:@"Clean" style:UIBarButtonItemStyleDone
+    UIBarButtonItem *clean = [[UIBarButtonItem alloc] initWithTitle:@"Clean" style:wq_primary_button_style()
                                                              target:self action:@selector(confirmClean)];
     clean.enabled = n > 0 && !_scanLimited;
     NSArray *visible = self.visibleItems;
