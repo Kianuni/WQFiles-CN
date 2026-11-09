@@ -9,13 +9,18 @@ mkdir -p "$OUT/fixtures"
 export TMPDIR="$OUT/fixtures/"
 export PYTHONDONTWRITEBYTECODE=1
 MAC_SDK=$(xcrun --sdk macosx --show-sdk-path)
+ASAN_FLAG=""
+if [[ "${WQ_ASAN:-0}" == "1" ]]; then
+    ASAN_FLAG="-fsanitize=address -fno-omit-frame-pointer"
+    export ASAN_OPTIONS="detect_leaks=0"
+fi
 
 compile_run() {
     local name=$1
     shift
     printf '\n== %s ==\n' "$name"
     xcrun --sdk macosx clang -fobjc-arc -fmodules -fmodules-cache-path="$OUT/modules-macos" \
-        -isysroot "$MAC_SDK" -Wall -Wextra -Werror -I. "$@" \
+        -isysroot "$MAC_SDK" -Wall -Wextra -Werror $ASAN_FLAG -I. "$@" \
         -framework Foundation -o "$OUT/$name" > "$OUT/$name-build.log" 2>&1 || {
             cat "$OUT/$name-build.log" >&2
             return 1
