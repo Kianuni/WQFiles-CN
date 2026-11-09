@@ -277,6 +277,16 @@ static inline int WQCreateDirectoriesNoLinks(NSString *path)
 
 static inline BOOL WQBackupStampValid(NSString *stamp)
 {
+    if (stamp.length < 15) return NO;
+    static NSCache<NSString *, NSNumber *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.countLimit = 1024;
+    });
+    NSNumber *known = [cache objectForKey:stamp];
+    if (known) return known.boolValue;
+
     // Recognize the historical second/millisecond stamps and the current
     // millisecond-counter format. No arbitrary directory can become a restore.
     NSString *pattern = @"^[0-9]{8}-[0-9]{6}(-[0-9]{3}(-[1-9][0-9]*)?)?$";
@@ -299,6 +309,8 @@ static inline BOOL WQBackupStampValid(NSString *stamp)
     fmt.dateFormat = @"yyyyMMdd-HHmmss";
     NSString *datePart = [stamp substringToIndex:15];
     NSDate *date = [fmt dateFromString:datePart];
-    return date && [[fmt stringFromDate:date] isEqualToString:datePart];
+    BOOL valid = date && [[fmt stringFromDate:date] isEqualToString:datePart];
+    [cache setObject:@(valid) forKey:stamp];
+    return valid;
 }
 #endif
