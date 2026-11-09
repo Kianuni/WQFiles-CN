@@ -21,6 +21,15 @@
       "category": "utilities",
       "versions": [
         {
+          "version": "0.5",
+          "buildVersion": "5",
+          "date": "2026-11-09",
+          "size": 220846,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.5/WQFiles.ipa",
+          "localizedDescription": "AltStore/SideStore source; safer saves and restores (rollback, interrupted-restore recovery, no overwriting changed files); Log shows version, device and iOS.",
+          "minOSVersion": "27.0"
+        },
+        {
           "version": "0.4",
           "buildVersion": "4",
           "date": "2026-11-09",
