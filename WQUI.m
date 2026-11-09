@@ -9,7 +9,7 @@
 #import <sys/utsname.h>
 
 // "iPhone 17 Pro Max (iPhone18,2)\niOS 27.0.1 (24A446)"
-static NSString *wq_device_line(void)
+NSString *wq_device_line(void)
 {
     struct utsname u;
     NSString *machine = (uname(&u) == 0) ? @(u.machine) : @"unknown";

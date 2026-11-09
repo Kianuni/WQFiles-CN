@@ -784,7 +784,6 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
             wq_log(@"enumerate %@: dynamic inode limit unavailable; falling back to %lld", dir, (long long)maxInode);
         }
     }
-    wq_log(@"enumerate %@: scanning object ids 1...%lld", dir, (long long)maxInode);
     const char *prefix = base.fileSystemRepresentation;
     size_t prefixLen = strlen(prefix);
     NSMutableArray<NSString *> *found = [NSMutableArray new];
@@ -817,11 +816,9 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
         if (progress && !cancellation.isCancelled) progress(nowDone, maxInode, count);
     });
     if (cancellation.isCancelled) {
-        wq_log(@"enumerate %@: cancelled after %lld object ids", dir, (long long)done);
         return nil;
     }
     [found sortUsingSelector:@selector(compare:)];
-    wq_log(@"enumerate %@: found %lu direct child container(s)", dir, (unsigned long)found.count);
     return found;
 }
 
@@ -938,8 +935,18 @@ NSString *wq_container_label(NSString *dir)
         buf[len] = 0;
         return [NSString stringWithUTF8String:buf];
     }
-    wq_grant(dir);  // the metadata plist needs a token on the container
+    // Reading the attribute can need a token on the container: ask, try again.
+    if (wq_grant(dir)) {
+        len = getxattr(dir.fileSystemRepresentation, "com.apple.containermanager.identifier", buf, sizeof(buf) - 1, 0, 0);
+        if (len > 0) {
+            buf[len] = 0;
+            return [NSString stringWithUTF8String:buf];
+        }
+    }
+    // The metadata plist is usually root-only (mode 600); only try it when the
+    // owner and mode let this app read it, so the Log isn't flooded.
     NSString *meta = [dir stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+    if (wq_permission_hint(meta, NO)) return nil;
     NSData *data = wq_read(meta, 256 * 1024, NULL);
     if (!data) return nil;
     NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil];

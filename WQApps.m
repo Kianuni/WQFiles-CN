@@ -230,9 +230,6 @@ static NSString *wq_make_app_backup(NSString *bundleID, NSString *container, NSS
         [apps sortUsingComparator:^NSComparisonResult(WQAppItem *a, WQAppItem *b) {
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
-        wq_log(@"app scan: discovered %lu, showing %lu, limited %lu (grant failures %lu, missing labels %lu)",
-               (unsigned long)containers.count, (unsigned long)apps.count, (unsigned long)limited,
-               (unsigned long)grantFailures, (unsigned long)missingLabels);
         NSString *note = nil;
         if (!containers) note = @"Container enumeration failed. Check the App Group and see Log.";
         else if (!containers.count) note = @"No app containers were found. Check the App Group and see Log.";
@@ -650,10 +647,13 @@ NSString *wq_recover_interrupted_restore(void)
     wq_log(@"restore %@ from %@: FAILED (%@), rolling back", app.bundleID, backup.lastPathComponent, error);
     NSString *rollbackError = nil;
     BOOL rolledBack = wq_rollback_safety(app.container, safety, &rollbackError);
+    // Keep the journal when the rollback failed, so the next launch tries the
+    // recovery again instead of leaving the app half restored.
     NSString *cleanupError = nil;
-    BOOL cleared = wq_clear_restore_journal(&cleanupError);
-    wq_log(@"restore %@: rollback %@, journal cleanup %@", app.bundleID,
-           rolledBack ? @"OK" : @"FAILED", cleared ? @"OK" : cleanupError);
+    BOOL cleared = rolledBack && wq_clear_restore_journal(&cleanupError);
+    if (!rolledBack) cleanupError = @"kept for recovery at the next launch";
+    wq_log(@"restore %@: rollback %@, journal %@", app.bundleID,
+           rolledBack ? @"OK" : @"FAILED", cleared ? @"cleared" : cleanupError);
     *title = @"Restore failed";
     *message = rolledBack
         ? [NSString stringWithFormat:@"%@. The previous data was put back.%@", error ?: @"Some files couldn't be written",

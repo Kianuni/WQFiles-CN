@@ -1032,15 +1032,24 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
                                                                                            target:self action:@selector(share:)];
 }
 
+// App version, device and iOS first, so a Log someone sends in says where it
+// came from.
+- (NSString *)fullLog
+{
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    return [NSString stringWithFormat:@"WQ Files %@ (%@)\n%@\n\n%@",
+            info[@"CFBundleShortVersionString"] ?: @"?", info[@"CFBundleVersion"] ?: @"?", wq_device_line(), wq_log_text()];
+}
+
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    _textView.text = wq_log_text();
+    _textView.text = [self fullLog];
 }
 
 - (void)share:(UIBarButtonItem *)sender
 {
-    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[wq_log_text()]
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[[self fullLog]]
                                                                         applicationActivities:nil];
     share.popoverPresentationController.barButtonItem = sender;
     [self presentViewController:share animated:YES completion:nil];

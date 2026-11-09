@@ -261,7 +261,9 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (BOOL)wq_needsLeaveConfirmation
 {
-    return self.doc.edit.dirty || self.doc.edit.saving;
+    // Going up a level inside the document keeps the edits: only leaving the
+    // document (from its root editor) needs a decision.
+    return self.isRoot && (self.doc.edit.dirty || self.doc.edit.saving);
 }
 
 - (void)leave
@@ -352,7 +354,8 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
 
 - (void)changed
 {
-    if (self.doc.edit.saving) return;
+    // Callers have already changed the data. Record it even during a save: the
+    // newer revision keeps the document dirty when that save finishes.
     [self.doc.edit noteChange];
     [self refresh];
 }
