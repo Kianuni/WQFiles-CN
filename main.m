@@ -696,9 +696,17 @@ static WQOpenMode wq_sniff(NSData *head)
     return WQOpenText;
 }
 
+static NSUInteger wq_open_generation;
+
 static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readOnly, WQOpenMode mode)
 {
+    // All calls originate on the main thread. A newer explicit or automatic
+    // open invalidates older sniff requests, and leaving the originating screen
+    // also prevents a late push.
+    NSUInteger request = ++wq_open_generation;
+    UIViewController *origin = nav.topViewController;
     void (^push)(WQOpenMode) = ^(WQOpenMode m) {
+        if (request != wq_open_generation || nav.topViewController != origin) return;
         UIViewController *vc;
         if (m == WQOpenPlist) {
             WQPlistEditorViewController *editor = [[WQPlistEditorViewController alloc] initWithPath:path readOnly:readOnly];
