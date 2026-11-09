@@ -96,10 +96,11 @@ and only change what you understand.
   refuses. See the `grant failed`/`enumerate` lines in **Log**.
 - **`(no label)`**: a token was obtained, but the container identifier
   (`com.apple.containermanager.identifier` xattr or the container metadata
-  plist) could not be read. System/daemon containers often have no identifier;
-  for app containers this usually means the xattr is unavailable or the
-  metadata plist is root-only. The folder remains browsable, but apps with no
-  identifier cannot be backed up or cleared until identity is available.
+  plist) could not be read. WQ Files now also asks the container manager for a
+  path-to-identifier map before giving up, which covers containers whose
+  xattr or root-only metadata plist is unavailable. If the identifier is still
+  missing (for example a system/daemon container with none), the folder stays
+  browsable but cannot be backed up or cleared until identity is available.
 
 ## Install with AltStore or SideStore
 
