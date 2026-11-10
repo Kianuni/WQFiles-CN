@@ -46,7 +46,8 @@ the way KAMUI does it.
 - **Files**: browse, read and share files; each opens in the fitting tool,
   and **Open As** switches between them. Saving writes back in place (same
   inode, owner and attributes). Create folders, import files, rename and
-  delete. Long-press a folder to share it as a ZIP.
+  delete (long-press, or swipe a row left or right; deleting always asks
+  first). Long-press a folder to share it as a ZIP.
   - **Plist editor**: browse dictionaries and arrays, edit values by type
     (switches for booleans, numbers, text, dates, data as hex), add, delete,
     rename and reorder. Saves in the file's own format (binary or XML).

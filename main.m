@@ -1069,6 +1069,49 @@ static NSString *wq_folder_date_text(NSDate *date)
     [self updateBackupSelectionBar];
 }
 
+// Swipe left or right to delete, with the same rules and confirmation as the
+// long-press menu (files are backed up first; backups only as whole units).
+- (UISwipeActionsConfiguration *)deleteSwipeForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    if (_selectingBackups || _error) return nil;
+    if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return nil;
+    WQItem *item = _items[(NSUInteger)indexPath.row];
+    BOOL backupUnit = item.isDir && wq_backup_unit_deletable(item.path);
+    BOOL regular = !self.readOnly && !_backupStorage;
+    if (!backupUnit && !regular) return nil;
+    NSString *itemPath = [item.path copy];
+    __weak typeof(self) weakSelf = self;
+    UIContextualAction *action = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+        title:@"Delete" handler:^(UIContextualAction *__unused a, UIView *__unused view, void (^done)(BOOL)) {
+        WQDirViewController *strongSelf = weakSelf;
+        WQItem *current = nil;
+        if (strongSelf && (NSUInteger)indexPath.row < strongSelf->_items.count &&
+            [strongSelf->_items[(NSUInteger)indexPath.row].path isEqualToString:itemPath])
+            current = strongSelf->_items[(NSUInteger)indexPath.row];
+        // The row stays until the confirmed delete reloads the folder.
+        done(NO);
+        if (!current) return;
+        if (backupUnit) [strongSelf confirmDeleteBackup:current];
+        else [strongSelf confirmDelete:current];
+    }];
+    action.image = [UIImage systemImageNamed:@"trash"];
+    UISwipeActionsConfiguration *config = [UISwipeActionsConfiguration configurationWithActions:@[action]];
+    config.performsFirstActionWithFullSwipe = YES;
+    return config;
+}
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    return [self deleteSwipeForRowAtIndexPath:indexPath];
+}
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    return [self deleteSwipeForRowAtIndexPath:indexPath];
+}
+
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
     contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point
 {
