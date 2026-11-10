@@ -1778,7 +1778,9 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 {
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 128)];
     UILabel *by = [UILabel new];
-    by.text = @"WQ Files by kolbicz";
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    by.text = [NSString stringWithFormat:@"WQ Files %@ (%@) by kolbicz",
+               info[@"CFBundleShortVersionString"] ?: @"?", info[@"CFBundleVersion"] ?: @"?"];
     by.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
     by.textColor = UIColor.secondaryLabelColor;
 
@@ -1837,12 +1839,9 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 {
     if (section == 0 && !wq_system_areas_reachable())
         return @"On iOS 26, System Data and System Groups can't be reached (worse_query covers them on iOS 27 only), and Internal Daemons need a scan of every file id: the first one can take most of an hour on a well-used device, later ones only check new files.";
-    if (section == 1) {
-        NSDictionary *info = NSBundle.mainBundle.infoDictionary;
-        return [NSString stringWithFormat:@"Overwritten and deleted files are copied to Backups first (also visible in the Files app). Long-press a backup to restore it.\n\nWQ Files %@ (%@)",
-                info[@"CFBundleShortVersionString"] ?: @"?", info[@"CFBundleVersion"] ?: @"?"];
-    }
-    return nil;
+    return section == 1
+        ? @"Overwritten and deleted files are copied to Backups first (also visible in the Files app). Long-press a backup to restore it."
+        : nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
