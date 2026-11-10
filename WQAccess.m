@@ -237,6 +237,16 @@ static NSString *wq_norm(NSString *path)
     return p;
 }
 
+// Whether the target can now be opened. Only a sandbox denial (EPERM) counts
+// as "the token didn't help": EACCES is ordinary file permissions (root-owned
+// system containers), which a token never changes.
+static BOOL wq_grant_opens(NSString *path)
+{
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd >= 0) { close(fd); return YES; }
+    return errno != EPERM;
+}
+
 BOOL wq_grant(NSString *path)
 {
     static dispatch_once_t once;
@@ -266,12 +276,39 @@ BOOL wq_grant(NSString *path)
         return NO;  // worse_query needs an existing target
     }
     // iOS 26 needs the alternative query flags; try the likely ones first so
-    // a grant costs one query, and the other set only when that fails.
-    BOOL altFirst = !wq_system_areas_reachable();
+    // a grant costs one query, and the other set only when that fails. A
+    // token can also be issued and consumed yet not open the target (seen on
+    // 27.0.1 with an AltStore app group): check, and then try the other flags.
+    // The set that works is remembered for the rest of the run.
+    static int preferAlt = -1;
+    BOOL altFirst = preferAlt >= 0 ? (BOOL)preferAlt : !wq_system_areas_reachable();
     int64_t handle = wq_query(key, altFirst);
+    BOOL usedAlt = altFirst;
+    if (handle >= 0 && !wq_grant_opens(key)) {
+        static BOOL logged;
+        if (!logged) {
+            logged = YES;
+            wq_log(@"grant: the token for %@ doesn't open it (%@ query flags); trying the other flags", key,
+                   altFirst ? @"alternative" : @"standard");
+        }
+        wq_release_handle(handle);
+        handle = -8;
+    }
     if (handle < 0 && handle != -1 && handle != -2) {
         int64_t alt = wq_query(key, !altFirst);
-        if (alt >= 0) handle = alt;
+        if (alt >= 0 && !wq_grant_opens(key)) {
+            wq_release_handle(alt);
+            alt = -8;
+        }
+        if (alt >= 0) {
+            handle = alt;
+            usedAlt = !altFirst;
+        }
+    }
+    if (handle >= 0 && preferAlt != (int)usedAlt) {
+        if (preferAlt >= 0 || usedAlt != !wq_system_areas_reachable())
+            wq_log(@"grant: the %@ query flags work on this device", usedAlt ? @"alternative" : @"standard");
+        preferAlt = usedAlt;
     }
     if (handle >= 0) {  // failures are retried next time
         gGrants[key] = @(handle);
