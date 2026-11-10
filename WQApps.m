@@ -532,7 +532,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
         if (!containers && !cancellation.isCancelled) wq_log(@"app scan: container enumeration failed; see the preceding enumerate log");
         else if (containers && containers.count == 0) wq_log(@"app scan: enumeration returned no container paths; check the base path and inode bound");
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
-        NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0, sizeLimited = 0;
+        NSMutableArray<NSString *> *refused = [NSMutableArray new];
+        NSUInteger i = 0, missingLabels = 0, limited = 0, sizeLimited = 0;
         for (NSString *c in containers) {
             if (cancellation.isCancelled) { WQAppScanStep(nil); return; }
             i++;
@@ -546,8 +547,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             WQAppScanStep([NSString stringWithFormat:@"getting access to %@ (%lu/%lu)", shortName, (unsigned long)i, (unsigned long)containers.count]);
             BOOL granted = wq_grant(c);
             if (!granted) {
-                grantFailures++;
-                if (grantFailures <= 3) wq_log(@"app scan: grant failed for %@", c);
+                [refused addObject:[NSString stringWithFormat:@"%@ (%@)", c.lastPathComponent,
+                                    wq_bundle_id_for_container(c) ?: @"unknown app"]];
             }
             WQAppScanStep([NSString stringWithFormat:@"reading the identifier of %@", shortName]);
             NSString *bid = wq_container_label(c);
@@ -584,6 +585,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
         WQAppScanStep(nil);
         if (cancellation.isCancelled) return;
         wq_log(@"app scan: %lu apps measured in %.1f s", (unsigned long)apps.count, CFAbsoluteTimeGetCurrent() - scanStarted);
+        if (refused.count) wq_log(@"app scan: %lu containers refused access: %@", (unsigned long)refused.count,
+                                  [refused componentsJoinedByString:@", "]);
         [apps sortUsingComparator:^NSComparisonResult(WQAppItem *a, WQAppItem *b) {
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];

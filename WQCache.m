@@ -572,7 +572,8 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
                 if (!granted || !safeContainer) {
                     scanLimited = YES;
                     limitedContainers++;
-                    wq_log(@"cache scan: %@ container access or path safety check failed", c);
+                    wq_log(@"cache scan: %@ (%@) %@", c.lastPathComponent, wq_bundle_id_for_container(c) ?: @"unknown app",
+                           safeContainer ? @"refused access" : @"failed the path safety check");
                 }
                 if (cacheState == WQCacheMeasurementLimited || tempState == WQCacheMeasurementLimited) {
                     scanLimited = YES;
