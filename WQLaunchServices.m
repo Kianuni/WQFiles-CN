@@ -125,6 +125,12 @@ static NSString *wq_find_ls_store(BOOL *searched)
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
     if (cachedValid) wq_ls_consider_candidate(cached, &bestPath, &best, seen);
 
+    // iOS 26: listing the daemon containers is an id scan of most of an hour;
+    // the database is found by the container scan (newest ids) and remembered.
+    if (!wq_system_areas_reachable()) {
+        if (searched) *searched = cachedValid;
+        return cachedValid ? cached : nil;
+    }
     NSArray *daemons = wq_enumerate(@"/private/var/mobile/Containers/Data/InternalDaemon", 0, nil, nil);
     if (daemons && searched) *searched = YES;
     if (daemons) {

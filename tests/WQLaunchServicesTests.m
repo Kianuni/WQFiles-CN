@@ -243,6 +243,11 @@ NSArray<NSString *> *wq_enumerate(NSString *__unused dir, int64_t __unused maxIn
     return nil;
 }
 
+BOOL wq_system_areas_reachable(void)
+{
+    return YES;   // the fixtures model iOS 27, where the daemon containers are listed
+}
+
 NSArray<NSString *> *wq_list(NSString *__unused dir, NSString *__unused *errorText)
 {
     return nil;

@@ -1424,11 +1424,6 @@ static NSMutableDictionary<NSString *, NSNumber *> *wq_scan_verify(fsid_t fsid, 
 // cancelled; the scan finishes and is reused by the next caller.
 static const NSTimeInterval kWQSharedScanTTL = 600;
 static NSObject *gSharedScanGuard;
-static NSDictionary<NSString *, NSArray<NSString *> *> *gSharedScan;
-static NSTimeInterval gSharedScanAt;
-static dispatch_group_t gSharedScanGroup;
-static BOOL gSharedScanIsInode, gSharedScanRunningInode;
-static NSMutableDictionary *gSharedScanBox;
 static void (^gScanProgress)(int64_t, int64_t, NSUInteger);
 static NSUInteger gScanProgressIndex;
 static id gScanProgressOwner;
@@ -1439,13 +1434,12 @@ static void wq_shared_scan_setup(void)
     dispatch_once(&once, ^{ gSharedScanGuard = [NSObject new]; });
 }
 
+static void wq_scan_slots_clear(void);
+
 void wq_enumerate_invalidate(void)
 {
     wq_shared_scan_setup();
-    @synchronized (gSharedScanGuard) {
-        gSharedScan = nil;
-        gSharedScanAt = 0;
-    }
+    @synchronized (gSharedScanGuard) { wq_scan_slots_clear(); }
 }
 
 
@@ -1794,6 +1788,35 @@ inodeScan:;
     return scan;
 }
 
+// One scan per slot runs at a time. On iOS 26 the Internal Daemons id scan
+// (most of an hour the first time) has its own slot, so the lists that come
+// from the LaunchServices database never wait for it.
+@interface WQScanSlot : NSObject
+@property (nonatomic, copy) NSDictionary<NSString *, NSArray<NSString *> *> *scan;
+@property (nonatomic) NSTimeInterval at;
+@property (nonatomic, strong) dispatch_group_t group;
+@property (nonatomic, strong) NSMutableDictionary *box;
+@end
+@implementation WQScanSlot
+@end
+
+static WQScanSlot *wq_scan_slot(BOOL inode)
+{
+    static WQScanSlot *slots[2];
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ slots[0] = [WQScanSlot new]; slots[1] = [WQScanSlot new]; });
+    return slots[inode ? 1 : 0];
+}
+
+static void wq_scan_slots_clear(void)
+{
+    for (int i = 0; i < 2; i++) {
+        WQScanSlot *slot = wq_scan_slot(i == 1);
+        slot.scan = nil;
+        slot.at = 0;
+    }
+}
+
 static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQScanCancellation *cancellation,
                                                void (^progress)(int64_t, int64_t, NSUInteger))
 {
@@ -1801,16 +1824,14 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
     NSUInteger baseIndex = [wq_shared_scan_roots() indexOfObject:base];
     // iOS 26 lists apps and extensions from the LaunchServices database; only
     // Internal Daemons need the (long) id scan.
-    BOOL needInode = !wq_system_areas_reachable() && [base isEqualToString:@"/private/var/mobile/Containers/Data/InternalDaemon"];
+    BOOL inodeOnly = !wq_system_areas_reachable() && [base isEqualToString:@"/private/var/mobile/Containers/Data/InternalDaemon"];
+    WQScanSlot *slot = wq_scan_slot(inodeOnly);
     id owner = [NSObject new];
-    for (;;) {
     dispatch_group_t group = nil;
     NSMutableDictionary *box = nil;
-    BOOL waitOnly = NO;
     @synchronized (gSharedScanGuard) {
-        if (gSharedScan && (!needInode || gSharedScanIsInode) &&
-            NSDate.date.timeIntervalSinceReferenceDate - gSharedScanAt < kWQSharedScanTTL) {
-            NSArray *cached = gSharedScan[base];
+        if (slot.scan && NSDate.date.timeIntervalSinceReferenceDate - slot.at < kWQSharedScanTTL) {
+            NSArray *cached = slot.scan[base];
             if (progress) progress(1, 1, cached.count);
             return cached;
         }
@@ -1819,17 +1840,14 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
             gScanProgressIndex = baseIndex;
             gScanProgressOwner = owner;
         }
-        if (gSharedScanGroup && needInode && !gSharedScanRunningInode) waitOnly = YES;  // then start the id scan
-        if (!gSharedScanGroup) {
+        if (!slot.group) {
             // A screen waiting for the result gets foreground priority; the
             // worker count stays at half the cores either way.
             qos_class_t qos = progress ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY;
-            BOOL inodeOnly = needInode;
-            gSharedScanRunningInode = inodeOnly;
             dispatch_group_t started = dispatch_group_create();
             NSMutableDictionary *startedBox = [NSMutableDictionary new];
-            gSharedScanGroup = started;
-            gSharedScanBox = startedBox;
+            slot.group = started;
+            slot.box = startedBox;
             dispatch_group_enter(started);
             dispatch_async(dispatch_get_global_queue(qos, 0), ^{
                 NSDictionary *scan = nil;
@@ -1841,31 +1859,28 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
                 @synchronized (gSharedScanGuard) {
                     if (scan) {
                         startedBox[@"scan"] = scan;
-                        gSharedScan = scan;
-                        gSharedScanIsInode = inodeOnly;
-                        gSharedScanAt = NSDate.date.timeIntervalSinceReferenceDate;
+                        slot.scan = scan;
+                        slot.at = NSDate.date.timeIntervalSinceReferenceDate;
                     }
-                    gSharedScanGroup = nil;
-                    gSharedScanBox = nil;
+                    slot.group = nil;
+                    slot.box = nil;
                 }
                 dispatch_group_leave(started);
             });
         }
-        group = gSharedScanGroup;
-        box = gSharedScanBox;
+        group = slot.group;
+        box = slot.box;
     }
     BOOL cancelled = NO;
     while (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0) {
         if (cancellation.isCancelled) { cancelled = YES; break; }
     }
-    if (waitOnly && !cancelled) continue;
     NSArray<NSString *> *result = nil;
     @synchronized (gSharedScanGuard) {
         if (gScanProgressOwner == owner) { gScanProgress = nil; gScanProgressOwner = nil; }
         if (!cancelled) result = box[@"scan"][base];
     }
     return result;
-    }
 }
 
 NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancellation *cancellation,
