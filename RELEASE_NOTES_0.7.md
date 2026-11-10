@@ -11,7 +11,7 @@ On iOS 27.2, apps and extensions showed up as long IDs without names, and the Ca
 
 - **Apps, Extension Data and App Groups are listed from the app database.** A full scan would take most of an hour on iOS 26; the database is found once and remembered.
 - **Internal Daemons** need a full scan on iOS 26. The first one takes long and shows the time left; later ones only check new files.
-- **Icons** are loaded from the app itself where iOS 26 hands out only a placeholder.
+- **Icons** are still missing for most apps on iOS 26: iOS doesn't hand them out to WQ Files there. Work in progress.
 - System Data and System Groups can't be reached on iOS 26 and are hidden.
 
 ## Faster scans
