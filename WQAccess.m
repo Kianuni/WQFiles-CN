@@ -1235,6 +1235,58 @@ BOOL wq_rename(NSString *path, NSString *newName, NSString **errorText)
     return rc == 0;
 }
 
+BOOL wq_move(NSString *path, NSString *destDir, NSString **errorText)
+{
+    NSString *source = WQCanonicalVarPath(path), *target = WQCanonicalVarPath(destDir);
+    NSString *name = source.lastPathComponent;
+    if (!WQAbsolutePathGrammar(source) || !WQAbsolutePathGrammar(target) || !name.length) {
+        if (errorText) *errorText = @"Invalid path";
+        return NO;
+    }
+    NSString *sourceParent = source.stringByDeletingLastPathComponent;
+    if ([sourceParent isEqualToString:target]) {
+        if (errorText) *errorText = @"It is already in this folder";
+        return NO;
+    }
+    if ([target isEqualToString:source] || [target hasPrefix:[source stringByAppendingString:@"/"]]) {
+        if (errorText) *errorText = @"A folder can't be moved into itself";
+        return NO;
+    }
+    if (wq_is_backup_storage_path(source) || wq_is_backup_storage_path([target stringByAppendingPathComponent:name])) {
+        if (errorText) *errorText = @"Backup storage cannot be changed through the file browser.";
+        return NO;
+    }
+    int from = wq_open_directory_flags(sourceParent, O_SEARCH);
+    if (from < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    int to = wq_open_directory_flags(target, O_SEARCH);
+    if (to < 0) { if (errorText) *errorText = wq_errno(errno); close(from); return NO; }
+    const char *n = name.fileSystemRepresentation;
+    // RENAME_EXCL: never replaces an item that is already there.
+    int rc = renameatx_np(from, n, to, n, RENAME_EXCL);
+    if (rc != 0 && wq_is_denied(errno)) {
+        wq_grant(sourceParent);
+        wq_grant(target);
+        wq_grant(source);
+        rc = renameatx_np(from, n, to, n, RENAME_EXCL);
+    }
+    int err = errno;
+    if (rc == 0) { fsync(to); fsync(from); }
+    close(from);
+    close(to);
+    wq_log(@"move: %@ -> %@: %@", path, destDir, rc == 0 ? @"OK" : wq_errno(err));
+    if (rc != 0 && errorText) {
+        *errorText = err == EEXIST ? [NSString stringWithFormat:@"An item named \"%@\" is already there", name]
+                   : err == EXDEV ? @"Items can't be moved to another volume"
+                   : wq_errno(err);
+    }
+    return rc == 0;
+}
+
+int wq_open_for_reading(NSString *path)
+{
+    return wq_open(path, O_RDONLY, 0);
+}
+
 // fsgetpath: resolve a filesystem object id to a path. Not in the public SDK.
 extern ssize_t fsgetpath(char *buf, size_t buflen, fsid_t *fsid, uint64_t objid);
 

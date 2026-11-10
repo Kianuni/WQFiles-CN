@@ -54,6 +54,13 @@ new files.
   delete (long-press, or swipe a row left or right; deleting always asks
   first). Sort by name, date modified, date created or size from the •••
   menu; long lists sorted by name get an A–Z sidebar. Long-press a folder to share it as a ZIP.
+  - **Select** (top right) several items to move, compress or delete them
+    together. **Move** works across apps: pick the items, open the target
+    folder in any app's data, tap **Move Here**. Existing items are never
+    replaced.
+  - **Compress** creates a ZIP next to the items; **Extract** (long-press a
+    .zip) unpacks it into a new folder. Entries that would land outside that
+    folder, encrypted ZIPs and symbolic links are refused or left out.
   - **Plist editor**: browse dictionaries and arrays, edit values by type
     (switches for booleans, numbers, text, dates, data as hex), add, delete,
     rename and reorder. Saves in the file's own format (binary or XML).

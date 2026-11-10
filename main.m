@@ -24,6 +24,8 @@
 #import "WQPlistEditorSupport.h"
 #import "WQHexViewer.h"
 #import "WQSQLiteViewer.h"
+#import "WQArchive.h"
+#import <sys/mount.h>
 
 static BOOL wq_looks_like_uuid(NSString *name)
 {
@@ -573,6 +575,37 @@ static NSString *wq_index_letter(NSString *name)
     return (c >= 'A' && c <= 'Z') ? [NSString stringWithCharacters:&c length:1] : @"#";
 }
 
+// Items picked with Move, waiting for "Move Here" in another folder.
+static NSArray<NSString *> *gWQMovePaths;
+static NSString *const kWQMoveChanged = @"WQMoveChanged";
+
+static void wq_set_move_paths(NSArray<NSString *> *paths)
+{
+    gWQMovePaths = paths.count ? [paths copy] : nil;
+    [NSNotificationCenter.defaultCenter postNotificationName:kWQMoveChanged object:nil];
+}
+
+// ZIP reading and writing through WQAccess, so other apps' files work too.
+static WQArchiveIO *wq_app_archive_io(void)
+{
+    WQArchiveIO *io = [WQArchiveIO new];
+    io.stat = ^BOOL(NSString *path, struct stat *st) { return wq_stat(path, st); };
+    io.list = ^NSArray<NSString *> *(NSString *dir) { return wq_list(dir, NULL); };
+    io.openRead = ^int(NSString *path) { return wq_open_for_reading(path); };
+    return io;
+}
+
+static NSString *wq_temp_work_dir(NSString *prefix)
+{
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                     [NSString stringWithFormat:@"%@-%@", prefix, NSUUID.UUID.UUIDString]];
+    return [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil] ? dir : nil;
+}
+
+@interface WQDirViewController ()
+- (BOOL)wq_wantsToolbar;
+@end
+
 @implementation WQDirViewController {
     NSString *_path;
     NSArray<WQItem *> *_all;     // everything in the folder
@@ -601,6 +634,11 @@ static NSString *wq_index_letter(NSString *name)
     NSTimeInterval _lastReloadFinished;
     NSArray<NSString *> *_indexTitles;          // sidebar letters, when sorted by name
     NSDictionary<NSString *, NSNumber *> *_indexRows;   // letter -> first row
+    BOOL _selectingFiles;
+    NSMutableOrderedSet<NSString *> *_selectedFiles;
+    UIBarButtonItem *_fileSelectItem;
+    UIBarButtonItem *_fileDoneItem;
+    UIBarButtonItem *_fileAllItem;
 }
 
 - (instancetype)initWithPath:(NSString *)path title:(NSString *)title
@@ -610,6 +648,7 @@ static NSString *wq_index_letter(NSString *name)
         self.title = title ?: (path.lastPathComponent.length ? path.lastPathComponent : @"/");
         _baseTitle = self.title;
         _selectedBackups = [NSMutableSet new];
+        _selectedFiles = [NSMutableOrderedSet new];
         // Container parents: show bundle/group identifiers instead of UUIDs.
         NSString *parent = path.lastPathComponent;
         _labels = [@[@"Application", @"AppGroup", @"PluginKitPlugin", @"InternalDaemon", @"System"] containsObject:parent];
@@ -673,10 +712,14 @@ static NSString *wq_index_letter(NSString *name)
         _selectItem = [[UIBarButtonItem alloc] initWithTitle:@"Select" style:UIBarButtonItemStylePlain
                                                        target:self action:@selector(enterBackupSelection)];
         _selectItem.enabled = NO;
-        self.navigationItem.rightBarButtonItems = @[_selectItem, _menuItem];
-    } else {
-        self.navigationItem.rightBarButtonItem = _menuItem;
+    } else if ([self canEditHere]) {
+        _fileSelectItem = [[UIBarButtonItem alloc] initWithTitle:@"Select" style:UIBarButtonItemStylePlain
+                                                           target:self action:@selector(enterFileSelection)];
     }
+    [self restoreRightItems];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(updateToolbar)
+                                               name:kWQMoveChanged object:nil];
+    [self updateToolbar];
     [self updateHeader];
     UISearchController *search = [[UISearchController alloc] initWithSearchResultsController:nil];
     search.searchResultsUpdater = self;
@@ -693,6 +736,7 @@ static NSString *wq_index_letter(NSString *name)
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
+    [self updateToolbar];
     if (_scanInFlight) return;
     NSTimeInterval age = NSDate.date.timeIntervalSinceReferenceDate - _lastReloadFinished;
     if (_scanNeedsRefresh || _lastReloadFinished <= 0 || age > 2.0) [self reload];
@@ -702,6 +746,7 @@ static NSString *wq_index_letter(NSString *name)
 {
     [super viewWillDisappear:animated];
     if (_selectingBackups) [self exitBackupSelection];
+    if (_selectingFiles) [self exitFileSelection];
     if (_scanInFlight) {
         _scanNeedsRefresh = YES;
         [_scanCancellation cancel];
@@ -803,7 +848,7 @@ static NSString *wq_index_letter(NSString *name)
 
 - (NSArray<NSString *> *)sectionIndexTitlesForTableView:(UITableView *)tableView
 {
-    return _selectingBackups || _error ? nil : _indexTitles;
+    return _selectingBackups || _selectingFiles || _error ? nil : _indexTitles;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index
@@ -878,8 +923,7 @@ static NSString *wq_index_letter(NSString *name)
     self.tableView.allowsMultipleSelection = NO;
     self.refreshControl.enabled = YES;
     self.title = _baseTitle;
-    self.navigationItem.rightBarButtonItems = _backupStorage ? @[_selectItem, _menuItem] : nil;
-    if (!_backupStorage) self.navigationItem.rightBarButtonItem = _menuItem;
+    [self restoreRightItems];
     [self.tableView reloadData];
     [self updateBackupSelectionAvailability];
 }
@@ -921,6 +965,321 @@ static NSString *wq_index_letter(NSString *name)
         } failure:@"Cannot delete backups"];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark File selection, Move, Compress, Extract
+
+// Ordinary folders where files may be created, moved and deleted: not
+// read-only areas, not backup storage, not the container lists themselves.
+- (BOOL)canEditHere
+{
+    return !self.readOnly && !_backupStorage && !_labels;
+}
+
+- (void)restoreRightItems
+{
+    if (_backupStorage && _selectItem) self.navigationItem.rightBarButtonItems = @[_selectItem, _menuItem];
+    else if (_fileSelectItem) self.navigationItem.rightBarButtonItems = @[_fileSelectItem, _menuItem];
+    else self.navigationItem.rightBarButtonItems = @[_menuItem];
+}
+
+- (BOOL)wq_wantsToolbar
+{
+    return _selectingFiles || gWQMovePaths.count > 0;
+}
+
+- (BOOL)canMoveHere
+{
+    if (![self canEditHere] || _error || !gWQMovePaths.count) return NO;
+    for (NSString *path in gWQMovePaths) {
+        if ([path.stringByDeletingLastPathComponent isEqualToString:_path]) return NO;
+        if ([_path isEqualToString:path] || [_path hasPrefix:[path stringByAppendingString:@"/"]]) return NO;
+    }
+    return YES;
+}
+
+- (void)updateToolbar
+{
+    _fileSelectItem.enabled = !_error && _all.count > 0;
+    UIBarButtonItem *flex = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
+    if (_selectingFiles) {
+        BOOL any = _selectedFiles.count > 0;
+        UIBarButtonItem *move = [[UIBarButtonItem alloc] initWithTitle:@"Move" style:UIBarButtonItemStylePlain
+                                                                target:self action:@selector(moveSelectedFiles)];
+        UIBarButtonItem *zip = [[UIBarButtonItem alloc] initWithTitle:@"Compress" style:UIBarButtonItemStylePlain
+                                                               target:self action:@selector(compressSelectedFiles)];
+        UIBarButtonItem *del = [[UIBarButtonItem alloc] initWithTitle:@"Delete" style:UIBarButtonItemStylePlain
+                                                               target:self action:@selector(deleteSelectedFiles)];
+        del.tintColor = UIColor.systemRedColor;
+        move.enabled = zip.enabled = del.enabled = any;
+        self.toolbarItems = @[move, flex, zip, flex, del];
+    } else if (gWQMovePaths.count) {
+        UIBarButtonItem *cancel = [[UIBarButtonItem alloc] initWithTitle:@"Cancel" style:UIBarButtonItemStylePlain
+                                                                  target:self action:@selector(cancelMove)];
+        UILabel *label = [UILabel new];
+        label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        label.textColor = UIColor.secondaryLabelColor;
+        label.text = gWQMovePaths.count == 1
+            ? [NSString stringWithFormat:@"Moving “%@”", gWQMovePaths.firstObject.lastPathComponent]
+            : [NSString stringWithFormat:@"Moving %lu items", (unsigned long)gWQMovePaths.count];
+        label.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [label sizeToFit];
+        CGRect frame = label.frame;
+        frame.size.width = MIN(frame.size.width, 180);
+        label.frame = frame;
+        UIBarButtonItem *info = [[UIBarButtonItem alloc] initWithCustomView:label];
+        UIBarButtonItem *here = [[UIBarButtonItem alloc] initWithTitle:@"Move Here" style:UIBarButtonItemStyleProminent
+                                                                target:self action:@selector(moveHere)];
+        here.enabled = [self canMoveHere];
+        self.toolbarItems = @[cancel, flex, info, flex, here];
+    } else {
+        self.toolbarItems = nil;
+    }
+    if (self.navigationController.topViewController == self)
+        [self.navigationController setToolbarHidden:![self wq_wantsToolbar] animated:YES];
+}
+
+- (void)updateFileSelectionTitle
+{
+    self.title = _selectedFiles.count
+        ? [NSString stringWithFormat:@"%lu Selected", (unsigned long)_selectedFiles.count] : @"Select Items";
+    _fileAllItem.enabled = _selectedFiles.count < _items.count;
+    [self updateToolbar];
+}
+
+- (void)enterFileSelection
+{
+    if (_error || _items.count == 0) return;
+    _selectingFiles = YES;
+    [_selectedFiles removeAllObjects];
+    if (!_fileDoneItem) {
+        _fileDoneItem = [[UIBarButtonItem alloc] initWithTitle:@"Done" style:UIBarButtonItemStyleProminent
+                                                        target:self action:@selector(exitFileSelection)];
+        _fileAllItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle"]
+                                                         style:UIBarButtonItemStylePlain
+                                                        target:self action:@selector(selectAllFiles)];
+        _fileAllItem.accessibilityLabel = @"Select All";
+    }
+    self.refreshControl.enabled = NO;
+    self.navigationItem.rightBarButtonItems = @[_fileDoneItem, _fileAllItem];
+    [self updateFileSelectionTitle];
+    [self.tableView reloadData];
+    [self.tableView reloadSectionIndexTitles];
+}
+
+- (void)exitFileSelection
+{
+    if (!_selectingFiles) return;
+    _selectingFiles = NO;
+    [_selectedFiles removeAllObjects];
+    self.refreshControl.enabled = YES;
+    self.title = _baseTitle;
+    [self restoreRightItems];
+    [self updateToolbar];
+    [self.tableView reloadData];
+    [self.tableView reloadSectionIndexTitles];
+}
+
+- (void)selectAllFiles
+{
+    for (WQItem *item in _items) [_selectedFiles addObject:item.path];
+    [self updateFileSelectionTitle];
+    [self.tableView reloadData];
+}
+
+- (NSArray<NSString *> *)selectedFilePaths
+{
+    return _selectedFiles.array.copy;
+}
+
+- (void)moveSelectedFiles
+{
+    NSArray<NSString *> *paths = [self selectedFilePaths];
+    if (!paths.count) return;
+    [self exitFileSelection];
+    [self startMove:paths];
+}
+
+- (void)startMove:(NSArray<NSString *> *)paths
+{
+    wq_set_move_paths(paths);
+    wq_alert(self, paths.count == 1 ? @"Move" : [NSString stringWithFormat:@"Move %lu items", (unsigned long)paths.count],
+             @"Open the folder you want to move to, then tap Move Here at the bottom. Any app's folder works.");
+}
+
+- (void)cancelMove
+{
+    wq_set_move_paths(nil);
+}
+
+- (void)moveHere
+{
+    NSArray<NSString *> *paths = gWQMovePaths;
+    if (![self canMoveHere]) return;
+    NSString *dest = _path;
+    wq_set_move_paths(nil);
+    [self runIO:^BOOL(NSString **error) {
+        NSUInteger failed = 0;
+        NSString *first = nil;
+        for (NSString *path in paths) {
+            NSString *e = nil;
+            if (!wq_move(path, dest, &e)) {
+                failed++;
+                if (!first) first = [NSString stringWithFormat:@"%@: %@", path.lastPathComponent, e ?: @"failed"];
+            }
+        }
+        if (failed && error) {
+            *error = paths.count == 1 ? first
+                : [NSString stringWithFormat:@"%lu of %lu items weren't moved.\n\n%@", (unsigned long)failed, (unsigned long)paths.count, first];
+        }
+        return failed == 0;
+    } failure:@"Cannot move"];
+}
+
+- (void)deleteSelectedFiles
+{
+    NSArray<NSString *> *paths = [self selectedFilePaths];
+    if (!paths.count) return;
+    NSString *title = paths.count == 1 ? [NSString stringWithFormat:@"Delete “%@”?", paths.firstObject.lastPathComponent]
+                                       : [NSString stringWithFormat:@"Delete %lu items?", (unsigned long)paths.count];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+        message:@"Files are copied to Backups first. Folders are deleted only when they are empty."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
+        [self exitFileSelection];
+        [self runIO:^BOOL(NSString **error) {
+            NSUInteger failed = 0;
+            NSString *first = nil;
+            for (NSString *path in paths) {
+                NSString *e = nil;
+                if (!wq_delete(path, &e)) {
+                    failed++;
+                    if (!first) first = [NSString stringWithFormat:@"%@: %@", path.lastPathComponent, e ?: @"failed"];
+                }
+            }
+            if (failed && error) {
+                *error = paths.count == 1 ? first
+                    : [NSString stringWithFormat:@"%lu of %lu items weren't deleted.\n\n%@", (unsigned long)failed, (unsigned long)paths.count, first];
+            }
+            return failed == 0;
+        } failure:@"Cannot delete"];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// "Name.zip", or "Name 2.zip" when that is taken in this folder.
+- (NSString *)unusedName:(NSString *)base extension:(NSString *)extension
+{
+    NSMutableSet<NSString *> *taken = [NSMutableSet new];
+    for (WQItem *item in _all) [taken addObject:item.name.lowercaseString];
+    for (NSUInteger n = 1; n < 10000; n++) {
+        NSString *stem = n == 1 ? base : [NSString stringWithFormat:@"%@ %lu", base, (unsigned long)n];
+        NSString *name = extension.length ? [stem stringByAppendingPathExtension:extension] : stem;
+        if (![taken containsObject:name.lowercaseString]) return name;
+    }
+    return [NSString stringWithFormat:@"%@ %@", base, NSUUID.UUID.UUIDString];
+}
+
+// Runs a long ZIP job with a progress alert that can cancel it.
+- (void)runArchiveJob:(NSString *)title failure:(NSString *)failureTitle
+                 work:(BOOL (^)(WQArchiveCancelled cancelled, WQArchiveProgress progress, NSString **error, NSString **note))work
+{
+    WQScanCancellation *cancellation = [WQScanCancellation new];
+    UIAlertController *hud = [UIAlertController alertControllerWithTitle:title message:@"Starting…"
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [hud addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
+                                          handler:^(UIAlertAction *__unused a) { [cancellation cancel]; }]];
+    [self presentViewController:hud animated:YES completion:nil];
+    __block CFAbsoluteTime lastUpdate = 0;
+    WQArchiveProgress progress = ^(unsigned long long bytes) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - lastUpdate < 0.25) return;
+        lastUpdate = now;
+        NSString *text = wq_size_text(bytes);
+        dispatch_async(dispatch_get_main_queue(), ^{ hud.message = text; });
+    };
+    WQArchiveCancelled cancelled = ^BOOL { return cancellation.isCancelled; };
+    dispatch_async(wq_io(), ^{
+        NSString *error = nil, *note = nil;
+        BOOL ok = work(cancelled, progress, &error, &note);
+        BOOL wasCancelled = cancellation.isCancelled;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            void (^finish)(void) = ^{
+                if (!ok && !wasCancelled) wq_alert(self, failureTitle, error ?: @"Unknown error");
+                else if (ok && note) wq_alert(self, title, note);
+                [self reload];
+            };
+            if (self.presentedViewController == hud) [self dismissViewControllerAnimated:YES completion:finish];
+            else finish();
+        });
+    });
+}
+
+- (void)compressSelectedFiles
+{
+    NSArray<NSString *> *paths = [self selectedFilePaths];
+    if (!paths.count) return;
+    [self exitFileSelection];
+    [self compressPaths:paths];
+}
+
+- (void)compressPaths:(NSArray<NSString *> *)paths
+{
+    NSString *base = paths.count == 1 ? paths.firstObject.lastPathComponent : @"Archive";
+    NSString *zipName = [self unusedName:base extension:@"zip"];
+    NSString *dest = [_path stringByAppendingPathComponent:zipName];
+    [self runArchiveJob:@"Compressing" failure:@"Cannot compress"
+                   work:^BOOL(WQArchiveCancelled cancelled, WQArchiveProgress progress, NSString **error, NSString **note) {
+        NSString *work = wq_temp_work_dir(@"wq-zip");
+        if (!work) { *error = @"Can't create a temporary folder"; return NO; }
+        NSString *local = [work stringByAppendingPathComponent:zipName];
+        NSUInteger skipped = 0;
+        BOOL ok = wq_zip_write(paths, local, wq_app_archive_io(), cancelled, progress, &skipped, error);
+        if (ok && cancelled()) ok = NO;
+        if (ok) ok = wq_create_file_from(dest, local, error);
+        [NSFileManager.defaultManager removeItemAtPath:work error:nil];
+        wq_log(@"compress: %lu item(s) -> %@: %@", (unsigned long)paths.count, dest, ok ? @"OK" : *error);
+        if (ok && skipped)
+            *note = [NSString stringWithFormat:@"Created %@. %lu symbolic link%@ or special file%@ were left out.",
+                     zipName, (unsigned long)skipped, skipped == 1 ? @"" : @"s", skipped == 1 ? @"" : @"s"];
+        return ok;
+    }];
+}
+
+- (void)extractZip:(NSString *)zipPath
+{
+    NSString *base = zipPath.lastPathComponent.stringByDeletingPathExtension;
+    NSString *folder = [self unusedName:base.length ? base : @"Archive" extension:nil];
+    NSString *dest = [_path stringByAppendingPathComponent:folder];
+    [self runArchiveJob:@"Extracting" failure:@"Cannot extract"
+                   work:^BOOL(WQArchiveCancelled cancelled, WQArchiveProgress progress, NSString **error, NSString **note) {
+        NSString *work = wq_temp_work_dir(@"wq-unzip");
+        if (!work) { *error = @"Can't create a temporary folder"; return NO; }
+        NSString *local = [work stringByAppendingPathComponent:folder];
+        [NSFileManager.defaultManager createDirectoryAtPath:local withIntermediateDirectories:NO attributes:nil error:nil];
+        // The files exist twice for a moment (temporary copy, then in place).
+        struct statfs fs;
+        unsigned long long available = statfs(work.fileSystemRepresentation, &fs) == 0
+            ? (unsigned long long)fs.f_bavail * fs.f_bsize : 0;
+        unsigned long long reserve = 256ull * 1024 * 1024;
+        unsigned long long limit = available > reserve ? (available - reserve) / 2 : 0;
+        NSUInteger files = 0, skipped = 0;
+        BOOL ok = wq_zip_extract(zipPath, local, wq_app_archive_io(), limit, cancelled, progress, &files, &skipped, error);
+        if (ok && cancelled()) ok = NO;
+        if (ok) ok = wq_create_dir(dest, error);
+        if (ok && !wq_copy_contents(local, dest, error)) {
+            ok = NO;
+            *error = [NSString stringWithFormat:@"%@\n\nSome files may already be in %@.", *error ?: @"Copying failed.", folder];
+        }
+        [NSFileManager.defaultManager removeItemAtPath:work error:nil];
+        wq_log(@"extract: %@ -> %@: %@ (%lu files, %lu skipped)", zipPath, dest, ok ? @"OK" : *error,
+               (unsigned long)files, (unsigned long)skipped);
+        if (ok && skipped)
+            *note = [NSString stringWithFormat:@"Extracted %lu file%@ into %@. %lu symbolic link%@ in the ZIP were left out.",
+                     (unsigned long)files, files == 1 ? @"" : @"s", folder, (unsigned long)skipped, skipped == 1 ? @"" : @"s"];
+        return ok;
+    }];
 }
 
 // Pull to refresh: container lists are scanned again instead of reused.
@@ -1115,6 +1474,14 @@ static NSString *wq_index_letter(NSString *name)
             [self.tableView reloadData];
             [self updateBackupSelectionAvailability];
             if (self->_selectingBackups) [self updateBackupSelectionBar];
+            if (self->_selectingFiles) {
+                NSMutableSet<NSString *> *present = [NSMutableSet new];
+                for (WQItem *item in items) [present addObject:item.path];
+                for (NSString *path in self->_selectedFiles.array.copy)
+                    if (![present containsObject:path]) [self->_selectedFiles removeObject:path];
+                [self updateFileSelectionTitle];
+            }
+            [self updateToolbar];
         });
     });
 }
@@ -1155,7 +1522,11 @@ static NSString *wq_index_letter(NSString *name)
     c.image = appIcon ?: [UIImage systemImageNamed:item.isDir ? @"folder.fill" : (item.isLink ? @"link" : @"doc")];
     if (appIcon) c.imageProperties.maximumSize = CGSizeMake(36, 36);
     cell.contentConfiguration = c;
-    if (_selectingBackups) {
+    if (_selectingFiles) {
+        cell.accessoryType = [_selectedFiles containsObject:item.path]
+            ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    } else if (_selectingBackups) {
         BOOL selectable = wq_backup_unit_deletable(item.path);
         cell.accessoryType = selectable && [_selectedBackups containsObject:item.path]
             ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
@@ -1177,6 +1548,16 @@ static NSString *wq_index_letter(NSString *name)
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
+    if (_selectingFiles) {
+        [tableView deselectRowAtIndexPath:indexPath animated:NO];
+        if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return;
+        NSString *path = _items[(NSUInteger)indexPath.row].path;
+        if ([_selectedFiles containsObject:path]) [_selectedFiles removeObject:path];
+        else [_selectedFiles addObject:path];
+        [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+        [self updateFileSelectionTitle];
+        return;
+    }
     if (_selectingBackups) {
         if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return;
         WQItem *selected = _items[(NSUInteger)indexPath.row];
@@ -1228,7 +1609,7 @@ static NSString *wq_index_letter(NSString *name)
 // long-press menu (files are backed up first; backups only as whole units).
 - (UISwipeActionsConfiguration *)deleteSwipeForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    if (_selectingBackups || _error) return nil;
+    if (_selectingBackups || _selectingFiles || _error) return nil;
     if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return nil;
     WQItem *item = _items[(NSUInteger)indexPath.row];
     BOOL backupUnit = item.isDir && wq_backup_unit_deletable(item.path);
@@ -1270,7 +1651,7 @@ static NSString *wq_index_letter(NSString *name)
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
     contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point
 {
-    if (_selectingBackups || _error) return nil;
+    if (_selectingBackups || _selectingFiles || _error) return nil;
     if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return nil;
     WQItem *item = _items[(NSUInteger)indexPath.row];
     NSString *itemPath = [item.path copy];
@@ -1346,6 +1727,26 @@ static NSString *wq_index_letter(NSString *name)
             }];
             remove.attributes = UIMenuElementAttributesDestructive;
             [actions addObject:remove];
+        }
+        if ([strongSelf canEditHere]) {
+            if (!current.isDir && current.isRegular &&
+                [current.name.pathExtension caseInsensitiveCompare:@"zip"] == NSOrderedSame) {
+                [actions addObject:[UIAction actionWithTitle:@"Extract" image:[UIImage systemImageNamed:@"archivebox"]
+                                                  identifier:nil handler:^(UIAction *__unused a) {
+                    WQItem *latest = currentItem();
+                    if (latest) [weakSelf extractZip:latest.path];
+                }]];
+            }
+            [actions addObject:[UIAction actionWithTitle:@"Compress" image:[UIImage systemImageNamed:@"doc.zipper"]
+                                              identifier:nil handler:^(UIAction *__unused a) {
+                WQItem *latest = currentItem();
+                if (latest) [weakSelf compressPaths:@[latest.path]];
+            }]];
+            [actions addObject:[UIAction actionWithTitle:@"Move…" image:[UIImage systemImageNamed:@"folder"]
+                                              identifier:nil handler:^(UIAction *__unused a) {
+                WQItem *latest = currentItem();
+                if (latest) [weakSelf startMove:@[latest.path]];
+            }]];
         }
         if (!strongSelf.readOnly && !strongSelf->_backupStorage) {
             [actions addObject:[UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"]
@@ -1675,6 +2076,8 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 
 - (void)navigationController:(UINavigationController *)nav willShowViewController:(UIViewController *)vc animated:(BOOL)animated
 {
+    BOOL toolbar = [vc isKindOfClass:WQDirViewController.class] && [(WQDirViewController *)vc wq_wantsToolbar];
+    [nav setToolbarHidden:!toolbar animated:animated];
     NSUInteger depth = [nav.viewControllers indexOfObject:vc];
     if (depth == NSNotFound || depth < 2) {
         if (vc.navigationItem.leftBarButtonItem.tag == 0x484f4d45) vc.navigationItem.leftBarButtonItem = nil;
