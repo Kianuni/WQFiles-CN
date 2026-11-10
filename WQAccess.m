@@ -305,10 +305,13 @@ BOOL wq_grant(NSString *path)
             usedAlt = !altFirst;
         }
     }
-    if (handle >= 0 && preferAlt != (int)usedAlt) {
-        if (preferAlt >= 0 || usedAlt != !wq_system_areas_reachable())
-            wq_log(@"grant: the %@ query flags work on this device", usedAlt ? @"alternative" : @"standard");
+    // Decided once, by the first grant that works: some targets refuse to
+    // open for their own reasons, and a per-target fallback already covers
+    // the rest, so flipping the preference back and forth only costs queries.
+    if (handle >= 0 && preferAlt < 0) {
         preferAlt = usedAlt;
+        if (usedAlt != !wq_system_areas_reachable())
+            wq_log(@"grant: the %@ query flags work on this device", usedAlt ? @"alternative" : @"standard");
     }
     if (handle >= 0) {  // failures are retried next time
         gGrants[key] = @(handle);
