@@ -63,6 +63,15 @@ require(ui, "host.presentedViewController && !host.presentedViewController.isBei
 require(sharing, "正在分享中", "share in-flight guard")
 require(sharing, "wq_clear_in_flight", "share in-flight cleanup")
 require(sharing, "actionWithTitle:@\"取消\"", "folder share cancel action")
+require(main, "@\"SQLite 查看器\"", "SQLite viewer Open As menu action")
+require(main, "@\"排序方式\"", "folder sort menu title")
+require(main, "@\"文件夹置顶\"", "folders on top option")
+require(main, "@\"正在扫描全盘文件\"", "full scan progress window title")
+require(main, "@\"签名问题：缺少 App Group 权限\"", "launch signing check alert title")
+sqlite_viewer = (ROOT / "WQSQLiteViewer.m").read_text()
+require(sqlite_viewer, "@\"数据表与视图\"", "SQLite tables header")
+require(sqlite_viewer, "@\"导出 CSV\"", "SQLite CSV export button")
+require(sqlite_viewer, "@\"此处仅支持运行只读 SQL 语句。\"", "SQLite read-only enforcement message")
 clear_preparation = sharing.split("static void wq_clear_preparation", 1)[1].split("static BOOL wq_present_share", 1)[0]
 require(clear_preparation, "if (!host) return;", "nil weak host association guard")
 

@@ -44,6 +44,13 @@ static NSObject *wq_ls_lock(void)
     return lock;
 }
 
+// The regression tests still exercise discovery through the daemon list.
+#ifdef WQ_LS_TESTING
+static BOOL wq_ls_test_daemon_search = YES;
+#else
+static const BOOL wq_ls_test_daemon_search = NO;
+#endif
+
 static NSString *wq_find_ls_store(BOOL *searched);
 static BOOL wq_ls_candidate_info(NSString *path, struct stat *st);
 
@@ -125,9 +132,10 @@ static NSString *wq_find_ls_store(BOOL *searched)
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
     if (cachedValid) wq_ls_consider_candidate(cached, &bestPath, &best, seen);
 
-    // iOS 26: listing the daemon containers is an id scan of most of an hour;
-    // the database is found by the container scan (newest ids) and remembered.
-    if (!wq_system_areas_reachable()) {
+    // Listing the daemon containers is a full id scan (minutes, and it asks
+    // first); the database is found by the container scan among the newest
+    // ids and remembered, so names only use the remembered location.
+    if (!wq_ls_test_daemon_search) {
         if (searched) *searched = cachedValid;
         return cachedValid ? cached : nil;
     }
