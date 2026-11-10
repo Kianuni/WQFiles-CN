@@ -1427,6 +1427,7 @@ static NSObject *gSharedScanGuard;
 static NSDictionary<NSString *, NSArray<NSString *> *> *gSharedScan;
 static NSTimeInterval gSharedScanAt;
 static dispatch_group_t gSharedScanGroup;
+static BOOL gSharedScanIsInode, gSharedScanRunningInode;
 static NSMutableDictionary *gSharedScanBox;
 static void (^gScanProgress)(int64_t, int64_t, NSUInteger);
 static NSUInteger gScanProgressIndex;
@@ -1700,9 +1701,13 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_st
 }
 
 
-static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_t fsid, qos_class_t qos)
+// inodeOnly: skip the container manager and LaunchServices shortcuts and scan
+// ids (iOS 26 Internal Daemons, which no database lists).
+static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_t fsid, qos_class_t qos, BOOL inodeOnly)
 {
     NSArray<NSString *> *roots = wq_shared_scan_roots();
+    if (inodeOnly) goto inodeScan;
+    {
     NSString *mcmSummary = nil;
     NSDictionary<NSString *, NSArray<NSString *> *> *listed = wq_mcm_list_containers(roots, &mcmSummary);
     wq_log(@"scan: %@", mcmSummary);
@@ -1730,6 +1735,8 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_
         NSDictionary *fromStore = wq_containers_from_ls_store(roots, fsid, qos, report);
         if (fromStore) return fromStore;
     }
+    }
+inodeScan:;
     int64_t probeInode = 0;
     int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
     if (maxInode <= 0) {
@@ -1792,11 +1799,17 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
 {
     wq_shared_scan_setup();
     NSUInteger baseIndex = [wq_shared_scan_roots() indexOfObject:base];
+    // iOS 26 lists apps and extensions from the LaunchServices database; only
+    // Internal Daemons need the (long) id scan.
+    BOOL needInode = !wq_system_areas_reachable() && [base isEqualToString:@"/private/var/mobile/Containers/Data/InternalDaemon"];
     id owner = [NSObject new];
+    for (;;) {
     dispatch_group_t group = nil;
     NSMutableDictionary *box = nil;
+    BOOL waitOnly = NO;
     @synchronized (gSharedScanGuard) {
-        if (gSharedScan && NSDate.date.timeIntervalSinceReferenceDate - gSharedScanAt < kWQSharedScanTTL) {
+        if (gSharedScan && (!needInode || gSharedScanIsInode) &&
+            NSDate.date.timeIntervalSinceReferenceDate - gSharedScanAt < kWQSharedScanTTL) {
             NSArray *cached = gSharedScan[base];
             if (progress) progress(1, 1, cached.count);
             return cached;
@@ -1806,10 +1819,13 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
             gScanProgressIndex = baseIndex;
             gScanProgressOwner = owner;
         }
+        if (gSharedScanGroup && needInode && !gSharedScanRunningInode) waitOnly = YES;  // then start the id scan
         if (!gSharedScanGroup) {
             // A screen waiting for the result gets foreground priority; the
             // worker count stays at half the cores either way.
             qos_class_t qos = progress ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY;
+            BOOL inodeOnly = needInode;
+            gSharedScanRunningInode = inodeOnly;
             dispatch_group_t started = dispatch_group_create();
             NSMutableDictionary *startedBox = [NSMutableDictionary new];
             gSharedScanGroup = started;
@@ -1818,7 +1834,7 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
             dispatch_async(dispatch_get_global_queue(qos, 0), ^{
                 NSDictionary *scan = nil;
                 @try {
-                    scan = wq_run_shared_scan(fsid, qos);
+                    scan = wq_run_shared_scan(fsid, qos, inodeOnly);
                 } @catch (NSException *exception) {
                     wq_log(@"scan: exception %@", exception.reason);
                 }
@@ -1826,6 +1842,7 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
                     if (scan) {
                         startedBox[@"scan"] = scan;
                         gSharedScan = scan;
+                        gSharedScanIsInode = inodeOnly;
                         gSharedScanAt = NSDate.date.timeIntervalSinceReferenceDate;
                     }
                     gSharedScanGroup = nil;
@@ -1841,12 +1858,14 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
     while (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0) {
         if (cancellation.isCancelled) { cancelled = YES; break; }
     }
+    if (waitOnly && !cancelled) continue;
     NSArray<NSString *> *result = nil;
     @synchronized (gSharedScanGuard) {
         if (gScanProgressOwner == owner) { gScanProgress = nil; gScanProgressOwner = nil; }
         if (!cancelled) result = box[@"scan"][base];
     }
     return result;
+    }
 }
 
 NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancellation *cancellation,

@@ -818,11 +818,20 @@ static NSString *wq_folder_date_text(NSDate *date)
                 self->_scanStatus = @"Scanning inodes…";
                 [self updateHeader];
             });
+            CFAbsoluteTime scanStarted = CFAbsoluteTimeGetCurrent();
             childPaths = wq_enumerate(path, 0, cancellation, ^(int64_t done, int64_t total, NSUInteger __unused f) {
+                // Time left, once the rate is known: an iOS 26 id scan can take most of an hour.
+                double elapsed = CFAbsoluteTimeGetCurrent() - scanStarted;
+                NSString *left = @"";
+                if (elapsed > 5 && done > 0 && done < total) {
+                    double remaining = elapsed * (double)(total - done) / (double)done;
+                    left = remaining >= 90 ? [NSString stringWithFormat:@" · about %.0f min left", ceil(remaining / 60)]
+                                           : @" · less than 2 min left";
+                }
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (generation != self->_scanGeneration || cancellation.isCancelled) return;
-                    self->_scanStatus = [NSString stringWithFormat:@"Scanning inodes… %lld%% · %lu found",
-                                         (long long)(done * 100 / total), (unsigned long)f];
+                    self->_scanStatus = [NSString stringWithFormat:@"Scanning inodes… %lld%% · %lu found%@",
+                                         total ? (long long)(done * 100 / total) : 0, (unsigned long)f, left];
                     [self updateHeader];
                 });
             });
@@ -847,7 +856,20 @@ static NSString *wq_folder_date_text(NSDate *date)
         NSUInteger labelIssues = 0;
         NSArray *entries = names ?: childPaths;
         BOOL haveFullPaths = names == nil;
+        NSUInteger entryIndex = 0, entryCount = entries.count;
         for (NSString *entry in entries) {
+            entryIndex++;
+            // Each container needs a token and its identifier: hundreds take a
+            // few seconds, so show where it is.
+            if (haveFullPaths && (entryIndex == 1 || entryIndex % 10 == 0)) {
+                NSUInteger shown = entryIndex;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (generation != self->_scanGeneration || cancellation.isCancelled) return;
+                    self->_scanStatus = [NSString stringWithFormat:@"Reading containers… %lu of %lu",
+                                         (unsigned long)shown, (unsigned long)entryCount];
+                    [self updateHeader];
+                });
+            }
             if (cancellation.isCancelled) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (generation != self->_scanGeneration) return;
@@ -1599,7 +1621,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
 {
     if (section == 0 && !wq_system_areas_reachable())
-        return @"On iOS 26, System Data and System Groups can't be reached (worse_query covers them on iOS 27 only), and Internal Daemons can't be listed: finding them would mean scanning every file on the device.";
+        return @"On iOS 26, System Data and System Groups can't be reached (worse_query covers them on iOS 27 only), and Internal Daemons need a scan of every file id: the first one can take most of an hour on a well-used device, later ones only check new files.";
     return section == 1
         ? @"Overwritten and deleted files are copied to Backups first (also visible in the Files app). Long-press a backup to restore it."
         : nil;
