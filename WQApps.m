@@ -455,6 +455,45 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
     [self.tableView reloadData];
 }
 
+// Watchdog for the app scan: each step records what it's doing; a timer logs
+// any step that stays unchanged for 10 s, so a hang shows up in the Log.
+static NSObject *gAppScanStepLock;
+static NSString *gAppScanStep;
+static CFAbsoluteTime gAppScanStepAt;
+static NSUInteger gAppScanStepSerial;
+
+static void WQAppScanStep(NSString *step)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gAppScanStepLock = [NSObject new]; });
+    @synchronized (gAppScanStepLock) {
+        gAppScanStep = [step copy];
+        gAppScanStepAt = CFAbsoluteTimeGetCurrent();
+        gAppScanStepSerial++;
+    }
+}
+
+static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSerial, NSUInteger reported)
+{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *step = nil;
+        NSUInteger serial = 0;
+        double age = 0;
+        @synchronized (gAppScanStepLock) {
+            step = gAppScanStep;
+            serial = gAppScanStepSerial;
+            age = CFAbsoluteTimeGetCurrent() - gAppScanStepAt;
+        }
+        if (!step) return;   // scan finished
+        NSUInteger nowReported = serial == lastSerial ? reported : 0;
+        if (age >= 10 && nowReported < 6) {
+            wq_log(@"app scan: still %@ after %.0f s%@", step, age, cancellation.isCancelled ? @" (screen left)" : @"");
+            nowReported++;
+        }
+        WQAppScanWatch(cancellation, serial, nowReported);
+    });
+}
+
 - (void)scan
 {
     [_scanCancellation cancel];
@@ -464,7 +503,10 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
     _scanning = YES;
     [self setBusy:YES status:@"Finding apps…"];
     NSString *home = [NSHomeDirectory() stringByResolvingSymlinksInPath];
+    WQAppScanStep(@"finding app containers");
+    WQAppScanWatch(cancellation, 0, 0);
     dispatch_async(wq_io(), ^{
+        CFAbsoluteTime scanStarted = CFAbsoluteTimeGetCurrent();
         NSArray *containers = wq_enumerate(@"/private/var/mobile/Containers/Data/Application", 0, cancellation,
             ^(int64_t done, int64_t total, NSUInteger __unused f) {
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -479,14 +521,20 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
                 self->_status = @"Reading app names…";
                 [self.tableView reloadData];
             });
+            WQAppScanStep(@"reading app names");
+            CFAbsoluteTime namesStarted = CFAbsoluteTimeGetCurrent();
             wq_load_display_names();
+            wq_log(@"app scan: app names %@ in %.1f s", wq_display_names_loaded() ? @"loaded" : @"not loaded",
+                   CFAbsoluteTimeGetCurrent() - namesStarted);
         }
+        if (containers) wq_log(@"app scan: %lu containers found in %.1f s; measuring", (unsigned long)containers.count,
+                               CFAbsoluteTimeGetCurrent() - scanStarted);
         if (!containers && !cancellation.isCancelled) wq_log(@"app scan: container enumeration failed; see the preceding enumerate log");
         else if (containers && containers.count == 0) wq_log(@"app scan: enumeration returned no container paths; check the base path and inode bound");
         NSMutableArray<WQAppItem *> *apps = [NSMutableArray new];
         NSUInteger i = 0, grantFailures = 0, missingLabels = 0, limited = 0, sizeLimited = 0;
         for (NSString *c in containers) {
-            if (cancellation.isCancelled) return;
+            if (cancellation.isCancelled) { WQAppScanStep(nil); return; }
             i++;
             if ([[c stringByResolvingSymlinksInPath] isEqualToString:home]) continue;  // ourselves
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -494,11 +542,14 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
                 self->_status = [NSString stringWithFormat:@"Measuring %lu/%lu…", (unsigned long)i, (unsigned long)containers.count];
                 [self.tableView reloadData];
             });
+            NSString *shortName = c.lastPathComponent;
+            WQAppScanStep([NSString stringWithFormat:@"getting access to %@ (%lu/%lu)", shortName, (unsigned long)i, (unsigned long)containers.count]);
             BOOL granted = wq_grant(c);
             if (!granted) {
                 grantFailures++;
                 if (grantFailures <= 3) wq_log(@"app scan: grant failed for %@", c);
             }
+            WQAppScanStep([NSString stringWithFormat:@"reading the identifier of %@", shortName]);
             NSString *bid = wq_container_label(c);
             if (!bid.length) {
                 missingLabels++;
@@ -521,14 +572,17 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
             app.sizeKnown = NO;
             unsigned long long appSize = 0;
             BOOL sizeKnown = NO;
-            if (granted && hasIdentity && !wq_dir_size_cancellable(c, cancellation, &appSize, &sizeKnown)) return;
+            WQAppScanStep([NSString stringWithFormat:@"measuring %@ (%@)", shortName, bid ?: @"no identifier"]);
+            if (granted && hasIdentity && !wq_dir_size_cancellable(c, cancellation, &appSize, &sizeKnown)) { WQAppScanStep(nil); return; }
             app.bytes = appSize;
             app.sizeKnown = sizeKnown;
             if (granted && hasIdentity && !sizeKnown) sizeLimited++;
             app.backups = bid.length ? wq_app_backups(bid) : @[];
             [apps addObject:app];
         }
+        WQAppScanStep(nil);
         if (cancellation.isCancelled) return;
+        wq_log(@"app scan: %lu apps measured in %.1f s", (unsigned long)apps.count, CFAbsoluteTimeGetCurrent() - scanStarted);
         [apps sortUsingComparator:^NSComparisonResult(WQAppItem *a, WQAppItem *b) {
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];

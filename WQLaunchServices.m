@@ -287,7 +287,7 @@ static void wq_ls_log_summary(const uint8_t *b, size_t n, NSString *layout, NSUI
     wq_log(@"names: store %.1f MB, layout %@: %lu bundle and %lu plugin records, %lu names, %lu of %lu container paths mapped",
            n / 1048576.0, layout, (unsigned long)bundleRecords, (unsigned long)pluginRecords, (unsigned long)names,
            (unsigned long)mapped, (unsigned long)pathCount);
-    if (!pathCount || mapped * 10 >= pathCount * 9) return;
+    if (!pathCount || mapped * 2 >= pathCount) return;
 
     // Vote for (record size, offset of the container reference).
     NSCountedSet<NSNumber *> *votes = [NSCountedSet new];
