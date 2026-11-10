@@ -605,7 +605,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
         NSString *note = nil;
-        if (!containers) note = @"Container enumeration failed. See Log for the statfs/inode reason.";
+        if (!containers && wq_full_scan_was_declined()) note = @"Apps aren't listed yet: this needs a scan of all files. Pull down to start it.";
+        else if (!containers) note = @"Container enumeration failed. See Log for the statfs/inode reason.";
         else if (!containers.count) note = @"No app containers were found. Refresh, and check Log for the enumeration reason.";
         else if (limited || sizeLimited) note = [NSString stringWithFormat:@"%lu containers · %lu with limited access, identity, size, or no identifier. See Log.",
                                                  (unsigned long)apps.count, (unsigned long)(limited + sizeLimited)];

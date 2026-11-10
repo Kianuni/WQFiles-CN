@@ -1097,7 +1097,9 @@ static NSString *wq_index_letter(NSString *name)
             self->_all = items;
             [self applyFilter];
             self->_error = (names || childPaths != nil) ? nil
-                : (error.length ? error : @"Cannot list this folder. Container enumeration failed; see Log.");
+                : (error.length ? error
+                   : wq_full_scan_was_declined() ? @"Not listed yet: this needs a scan of all files. Pull down to start it."
+                   : @"Cannot list this folder. Container enumeration failed; see Log.");
             self->_scanStatus = nil;
             self->_lastReloadFinished = NSDate.date.timeIntervalSinceReferenceDate;
             [self.refreshControl endRefreshing];
@@ -1738,13 +1740,36 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
                 wq_alert(self, @"Restore recovery", recovery);
             });
         }
+        (void)wq_app_group();   // resolves (and logs) the group off the main thread
+    });
+}
+
+// Signing check, once the start screen is on screen (an alert presented
+// while it is still loading would be dropped).
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+    static BOOL checked;
+    if (checked) return;
+    checked = YES;
+    dispatch_async(wq_io(), ^{
         NSString *group = wq_app_group();
-        if (!group) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                wq_alert(self, @"No App Group",
-                         @"This app needs an App Group to reach other folders. Re-sign it with a tool that keeps the App Group entitlement.");
-            });
-        }
+        if (group) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Signing problem: no App Group"
+                message:@"WQ Files needs an App Group to reach other apps' folders, and the tool that signed it removed it. "
+                        @"Without it nothing can be opened, and app lists stay empty or show \"NO TOKEN\".\n\n"
+                        @"Re-install WQ Files with AltStore, SideStore or Sideloadly (they create the App Group), "
+                        @"or with a provisioning profile that contains one. Wildcard certificates (as used by many "
+                        @"Feather/ESign setups) can't."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Signing Help" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
+                [UIApplication.sharedApplication openURL:[NSURL URLWithString:@"https://github.com/kolbicz/WQFiles#signing-the-app-group"]
+                                                 options:@{} completionHandler:nil];
+            }]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
     });
 }
 
@@ -1932,6 +1957,187 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 
 @end
 
+#pragma mark - Full scan: confirmation and progress window
+
+static UIViewController *wq_top_view_controller(void)
+{
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (!window.isKeyWindow) continue;
+            UIViewController *top = window.rootViewController;
+            while (top.presentedViewController && !top.presentedViewController.isBeingDismissed) top = top.presentedViewController;
+            return top;
+        }
+    }
+    return nil;
+}
+
+static NSString *wq_duration_text(double seconds)
+{
+    if (seconds < 90) return @"about a minute";
+    if (seconds < 3600) return [NSString stringWithFormat:@"about %.0f minutes", ceil(seconds / 60)];
+    return [NSString stringWithFormat:@"about %.1f hours", seconds / 3600];
+}
+
+static NSString *wq_count_text(int64_t n)
+{
+    if (n >= 1000000) return [NSString stringWithFormat:@"%.0f million", n / 1e6];
+    return [NSNumberFormatter localizedStringFromNumber:@(n) numberStyle:NSNumberFormatterDecimalStyle];
+}
+
+@interface WQScanWindowController : UIViewController
+- (void)updateDone:(int64_t)done total:(int64_t)total;
+@end
+
+@implementation WQScanWindowController {
+    UIProgressView *_bar;
+    UILabel *_status;
+    CFAbsoluteTime _started;
+}
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    _started = CFAbsoluteTimeGetCurrent();
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
+    icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:40 weight:UIImageSymbolWeightRegular];
+    icon.tintColor = UIColor.tintColor;
+    UILabel *title = [UILabel new];
+    title.text = @"Scanning all files";
+    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
+    title.adjustsFontForContentSizeCategory = YES;
+    UILabel *text = [UILabel new];
+    text.numberOfLines = 0;
+    text.textAlignment = NSTextAlignmentCenter;
+    text.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    text.textColor = UIColor.secondaryLabelColor;
+    text.text = @"iOS doesn't let WQ Files list these folders directly, so it checks every file on this device once. "
+                @"This is only slow the first time: later scans only check new files.\n\n"
+                @"Keep WQ Files open. Switching to another app or locking the screen pauses the scan.";
+    _bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    _status = [UILabel new];
+    _status.font = [UIFont monospacedDigitSystemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleBody].pointSize
+                                                    weight:UIFontWeightRegular];
+    _status.textAlignment = NSTextAlignmentCenter;
+    _status.text = @"Starting…";
+    UIButton *hide = [UIButton buttonWithConfiguration:UIButtonConfiguration.borderedButtonConfiguration primaryAction:
+        [UIAction actionWithTitle:@"Hide" image:nil identifier:nil handler:^(UIAction *__unused a) {
+            [self dismissViewControllerAnimated:YES completion:nil];
+        }]];
+    UIButtonConfiguration *stopConfig = UIButtonConfiguration.borderedButtonConfiguration;
+    stopConfig.baseForegroundColor = UIColor.systemRedColor;
+    UIButton *stop = [UIButton buttonWithConfiguration:stopConfig primaryAction:
+        [UIAction actionWithTitle:@"Stop Scan" image:nil identifier:nil handler:^(UIAction *__unused a) {
+            wq_full_scan_stop();
+            [self dismissViewControllerAnimated:YES completion:nil];
+        }]];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[hide, stop]];
+    buttons.spacing = 12;
+    buttons.distribution = UIStackViewDistributionFillEqually;
+    UILabel *note = [UILabel new];
+    note.numberOfLines = 0;
+    note.textAlignment = NSTextAlignmentCenter;
+    note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    note.textColor = UIColor.tertiaryLabelColor;
+    note.text = @"Hide keeps the scan running; the list fills in when it's done.";
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[icon, title, text, _bar, _status, buttons, note]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 16;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:stack];
+    UILayoutGuide *g = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerYAnchor constraintEqualToAnchor:g.centerYAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:24],
+        [stack.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-24],
+        [_bar.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+        [buttons.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+        [text.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+        [note.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+    ]];
+}
+
+- (void)updateDone:(int64_t)done total:(int64_t)total
+{
+    if (total <= 0) return;
+    float fraction = (float)((double)done / (double)total);
+    [_bar setProgress:fraction animated:NO];
+    double elapsed = CFAbsoluteTimeGetCurrent() - _started;
+    NSString *left = @"";
+    if (elapsed > 5 && done > 0 && done < total) {
+        double remaining = elapsed * (double)(total - done) / (double)done;
+        left = [@" · " stringByAppendingString:[wq_duration_text(remaining) stringByAppendingString:@" left"]];
+    }
+    _status.text = [NSString stringWithFormat:@"%.0f%%%@", fraction * 100, left];
+}
+
+@end
+
+static WQScanWindowController *gScanWindow;
+static UIBackgroundTaskIdentifier gScanBackgroundTask;   // 0 is UIBackgroundTaskInvalid
+
+// Called on a scan thread: asks on the main thread and waits for the answer.
+static BOOL wq_confirm_full_scan(NSString *what, int64_t ids, double seconds)
+{
+    dispatch_semaphore_t answered = dispatch_semaphore_create(0);
+    __block BOOL start = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = wq_top_view_controller();
+        if (!top) { dispatch_semaphore_signal(answered); return; }   // not in front: don't scan unasked
+        NSString *message = [NSString stringWithFormat:
+            @"To list %@, WQ Files has to check every file on this device once: %@ files, %@.\n\n"
+            @"This is only needed the first time; later scans only check new files and take seconds.\n\n"
+            @"Keep WQ Files open while it scans.", what, wq_count_text(ids), wq_duration_text(seconds)];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Scan all files?" message:message
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:^(UIAlertAction *__unused a) {
+            dispatch_semaphore_signal(answered);
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Start Scan" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
+            start = YES;
+            // A little extra time when the user switches away (iOS grants about 30 s).
+            if (gScanBackgroundTask == UIBackgroundTaskInvalid) {
+                gScanBackgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"WQ full scan" expirationHandler:^{
+                    [UIApplication.sharedApplication endBackgroundTask:gScanBackgroundTask];
+                    gScanBackgroundTask = UIBackgroundTaskInvalid;
+                }];
+            }
+            WQScanWindowController *window = [WQScanWindowController new];
+            window.modalPresentationStyle = UIModalPresentationPageSheet;
+            window.sheetPresentationController.detents = @[UISheetPresentationControllerDetent.mediumDetent,
+                                                          UISheetPresentationControllerDetent.largeDetent];
+            window.sheetPresentationController.prefersGrabberVisible = YES;
+            gScanWindow = window;
+            dispatch_semaphore_signal(answered);
+            // After the alert has gone (presenting during its dismissal fails).
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIViewController *host = wq_top_view_controller();
+                if (gScanWindow == window && host && host != window) [host presentViewController:window animated:YES completion:nil];
+            });
+        }]];
+        [top presentViewController:alert animated:YES completion:nil];
+    });
+    dispatch_semaphore_wait(answered, DISPATCH_TIME_FOREVER);
+    return start;
+}
+
+static void wq_full_scan_progress(int64_t done, int64_t total, BOOL finished)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!finished) { [gScanWindow updateDone:done total:total]; return; }
+        WQScanWindowController *window = gScanWindow;
+        gScanWindow = nil;
+        if (window.presentingViewController && !window.isBeingDismissed) [window dismissViewControllerAnimated:YES completion:nil];
+        if (gScanBackgroundTask != UIBackgroundTaskInvalid) {
+            [UIApplication.sharedApplication endBackgroundTask:gScanBackgroundTask];
+            gScanBackgroundTask = UIBackgroundTaskInvalid;
+        }
+    });
+}
+
 @interface WQAppDelegate : UIResponder <UIApplicationDelegate>
 @end
 
@@ -1955,6 +2161,7 @@ int main(int argc, char *argv[])
         // when the identifier attribute can't be read (iOS 27.2).
         wq_set_container_label_resolver(wq_bundle_id_for_container);
         wq_set_container_list_provider(wq_ls_container_paths);
+        wq_set_full_scan_ui(wq_confirm_full_scan, wq_full_scan_progress);
         return UIApplicationMain(argc, argv, nil, NSStringFromClass(WQAppDelegate.class));
     }
 }

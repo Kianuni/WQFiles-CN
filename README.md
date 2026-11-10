@@ -27,9 +27,14 @@ app data, the Cache Cleaner and the file browser work as on iOS 27.
   MobileGestalt cache and the configuration-profiles (Supervision) folder.
 - **Go to Path** for any absolute path.
 
-The container parents give no access token on 27.0.1, so their contents are
-found by asking the kernel for the path of each inode number (`fsgetpath`),
-the way KAMUI does it.
+The container parents can't be listed, so App Data, Extension Data and App
+Groups come from the LaunchServices database, which lists every installed
+app's and extension's containers. It is found once (among the newest files,
+usually within seconds) and remembered. Internal Daemons, and the app folders
+when the database can't be read, need a scan of every file id (`fsgetpath`,
+the way KAMUI does it): minutes on a well-used device the first time, so WQ
+Files asks before it starts and shows a scan window; later scans only check
+new files.
 
 ## Tools
 

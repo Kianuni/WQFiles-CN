@@ -43,7 +43,7 @@ compile_run WQAppsSupportTests tests/WQAppsSupportTests.m
 compile_run WQCacheSafetyTests tests/WQCacheSafetyTests.m
 compile_run WQPlistEditorSupportTests tests/WQPlistEditorSupportTests.m
 compile_run WQHexViewerHelpersTests tests/WQHexViewerHelpersTests.m
-compile_run WQLaunchServicesTests WQLaunchServices.m tests/WQLaunchServicesTests.m
+compile_run WQLaunchServicesTests -DWQ_LS_TESTING WQLaunchServices.m tests/WQLaunchServicesTests.m
 
 printf '\n== Python release and static UI checks ==\n'
 python3 -m unittest discover -s tests -p 'test_*.py' -v > "$OUT/python-tests.log" 2>&1 || {

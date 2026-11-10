@@ -1292,7 +1292,8 @@ typedef void (^WQScanProgress)(int64_t done, int64_t total, const NSUInteger *co
 static NSArray<NSMutableDictionary<NSString *, NSNumber *> *> *wq_scan_children(fsid_t fsid, int64_t firstId, int64_t lastId,
                                                                                NSArray<NSString *> *bases,
                                                                                WQScanCancellation *cancellation,
-                                                                               qos_class_t qos, WQScanProgress progress)
+                                                                               qos_class_t qos, BOOL allCores,
+                                                                               WQScanProgress progress)
 {
     NSUInteger baseCount = MIN(bases.count, (NSUInteger)8);
     // Heap tables: blocks can't capture C arrays.
@@ -1313,7 +1314,10 @@ static NSArray<NSMutableDictionary<NSString *, NSNumber *> *> *wq_scan_children(
     int64_t chunks = (total + chunk - 1) / chunk;
     __block int64_t nextChunk = 0, done = 0;
     NSUInteger cores = NSProcessInfo.processInfo.activeProcessorCount;
-    size_t workers = (size_t)MAX((NSUInteger)1, MIN((NSUInteger)4, cores / 2));
+    // A full scan the user agreed to wait for uses all but two cores; the
+    // short incremental scans stay at half the cores.
+    size_t workers = allCores ? (size_t)MAX((NSUInteger)2, MIN((NSUInteger)8, cores > 2 ? cores - 2 : 1))
+                              : (size_t)MAX((NSUInteger)1, MIN((NSUInteger)4, cores / 2));
     dispatch_apply(workers, dispatch_get_global_queue(qos, 0), ^(size_t __unused w) {
         fsid_t id = fsid;
         char buf[1200];
@@ -1597,7 +1601,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_mcm_list_containers(N
 
 // Samples ids across the volume. On some releases fsgetpath resolves only the
 // caller's own files; then a full scan takes minutes and finds nothing.
-static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode)
+static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode, double *idsPerSecond)
 {
     NSMutableArray<NSString *> *own = [NSMutableArray arrayWithObject:wq_norm(NSHomeDirectory())];
     NSString *bundle = wq_norm(NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent);
@@ -1636,7 +1640,65 @@ static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode)
             [parts addObject:[NSString stringWithFormat:@"%@ x%lu", area, (unsigned long)[areas countForObject:area]]];
         wq_log(@"scan: resolvable areas: %@", [parts componentsJoinedByString:@", "]);
     }
+    double elapsed = CFAbsoluteTimeGetCurrent() - started;
+    if (idsPerSecond) *idsPerSecond = elapsed > 0 ? sampled / elapsed : 0;
     return foreign > 0;
+}
+
+// Full scans (every file id) take minutes on a well-used device. The UI
+// confirms them first and shows their progress; without a UI hook (or when
+// the app isn't in front) they don't start.
+static BOOL (*gFullScanConfirm)(NSString *what, int64_t ids, double seconds);
+static void (*gFullScanProgress)(int64_t done, int64_t total, BOOL finished);
+static WQScanCancellation *gFullScanStop;
+static _Atomic BOOL gFullScanDeclined;
+
+void wq_set_full_scan_ui(BOOL (*confirm)(NSString *what, int64_t ids, double seconds),
+                         void (*progress)(int64_t done, int64_t total, BOOL finished))
+{
+    gFullScanConfirm = confirm;
+    gFullScanProgress = progress;
+}
+
+void wq_full_scan_stop(void)
+{
+    @synchronized (NSNull.null) { [gFullScanStop cancel]; }
+}
+
+BOOL wq_full_scan_was_declined(void)
+{
+    return atomic_load(&gFullScanDeclined);
+}
+
+// Asks before a full scan. Returns the scan's stop token, or nil when the user
+// (or the missing UI) declined.
+static WQScanCancellation *wq_full_scan_begin(NSString *what, int64_t ids, double seconds)
+{
+    if (!gFullScanConfirm || !gFullScanConfirm(what, ids, seconds)) {
+        atomic_store(&gFullScanDeclined, YES);
+        wq_log(@"scan: full scan of %@ not started (%lld ids, about %.0f s)", what, (long long)ids, seconds);
+        return nil;
+    }
+    atomic_store(&gFullScanDeclined, NO);
+    WQScanCancellation *stop = [WQScanCancellation new];
+    @synchronized (NSNull.null) { gFullScanStop = stop; }
+    return stop;
+}
+
+static void wq_full_scan_end(WQScanCancellation *stop)
+{
+    @synchronized (NSNull.null) { if (gFullScanStop == stop) gFullScanStop = nil; }
+    if (gFullScanProgress) gFullScanProgress(0, 0, YES);
+    if (stop.isCancelled) wq_log(@"scan: full scan stopped");
+}
+
+// Rough duration of a full scan from a single-thread sample rate.
+static double wq_full_scan_estimate(int64_t ids, double sampleRate)
+{
+    NSUInteger cores = NSProcessInfo.processInfo.activeProcessorCount;
+    double workers = MAX(2.0, MIN(8.0, cores > 2 ? (double)cores - 2 : 1.0));
+    double rate = (sampleRate > 0 ? sampleRate : 15000.0) * workers * 0.8;
+    return ids / rate;
 }
 
 static NSArray<NSString *> *(*gContainerListProvider)(NSString *storeHint);
@@ -1656,8 +1718,11 @@ static BOOL wq_is_ls_store_name(const char *path)
 
 // The LaunchServices database is rewritten on every app install or update, so
 // its id is among the newest: scan down from the top and stop at the first.
+static const CFTimeInterval kWQStoreSearchLimit = 20;
+
 static NSString *wq_scan_for_ls_store(fsid_t fsid, int64_t maxInode, qos_class_t qos, WQScanProgress progress)
 {
+    CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     const int64_t chunk = 32768;
     int64_t chunks = (maxInode + chunk - 1) / chunk;
     __block int64_t nextChunk = 0, done = 0;
@@ -1676,6 +1741,9 @@ static NSString *wq_scan_for_ls_store(fsid_t fsid, int64_t maxInode, qos_class_t
             int64_t c = nextChunk++;
             [lock unlock];
             if (c >= chunks) return;
+            // Normally found among the newest ids within seconds; past the
+            // limit the full scan is the better way (and asks first).
+            if (CFAbsoluteTimeGetCurrent() - started > kWQStoreSearchLimit) { [stop cancel]; return; }
             int64_t last = maxInode - c * chunk, first = MAX((int64_t)1, last - chunk + 1);
             for (int64_t ino = last; ino >= first; ino--) {
                 if ((ino & 127) == 0 && stop.isCancelled) return;
@@ -1737,6 +1805,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_st
 static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_t fsid, qos_class_t qos, BOOL inodeOnly)
 {
     NSArray<NSString *> *roots = wq_shared_scan_roots();
+    atomic_store(&gFullScanDeclined, NO);
     if (inodeOnly) goto inodeScan;
     {
     NSString *mcmSummary = nil;
@@ -1755,9 +1824,9 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_
         if (![merged[roots[2]] count]) merged[roots[2]] = @[];
         return merged;
     }
-    if (!wq_system_areas_reachable()) {
-        // A full scan of a well-used iOS 26 device is 100+ million ids
-        // (about 40 minutes); the database lists the same containers.
+    {
+        // A full scan is tens of millions of ids (minutes, up to most of an
+        // hour); the database lists the same app and extension containers.
         WQScanProgress report = ^(int64_t done, int64_t total, const NSUInteger *__unused counts) {
             void (^progress)(int64_t, int64_t, NSUInteger) = nil;
             @synchronized (gSharedScanGuard) { progress = gScanProgress; }
@@ -1792,9 +1861,17 @@ inodeScan:;
         firstId = [cache[@"probe"] longLongValue] + 1;
         fullAt = [cache[@"fullAt"] doubleValue];
     }
-    if (!cache && !wq_fsgetpath_sees_others(fsid, maxInode)) {
+    double sampleRate = 0;
+    if (!cache && !wq_fsgetpath_sees_others(fsid, maxInode, &sampleRate)) {
         wq_log(@"scan: on this iOS version fsgetpath only resolves WQ Files' own files, so containers can't be found by scanning");
         return nil;
+    }
+    WQScanCancellation *stop = nil;
+    if (!cache) {
+        stop = wq_full_scan_begin(inodeOnly ? @"Internal Daemons" : @"the app folders", maxInode,
+                                  wq_full_scan_estimate(maxInode, sampleRate));
+        if (!stop) return nil;
+        qos = QOS_CLASS_USER_INITIATED;
     }
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     WQScanProgress report = ^(int64_t done, int64_t total, const NSUInteger *counts) {
@@ -1802,8 +1879,10 @@ inodeScan:;
         NSUInteger index = 0;
         @synchronized (gSharedScanGuard) { progress = gScanProgress; index = gScanProgressIndex; }
         if (progress) progress(done, total, (index < roots.count ? known[index].count : 0) + (index < 8 ? counts[index] : 0));
+        if (stop && gFullScanProgress) gFullScanProgress(done, total, NO);
     };
-    NSArray *lists = wq_scan_children(fsid, firstId, maxInode, roots, nil, qos, report);
+    NSArray *lists = wq_scan_children(fsid, firstId, maxInode, roots, stop, qos, stop != nil, report);
+    if (stop) wq_full_scan_end(stop);
     if (!lists) return nil;
     NSMutableDictionary *saved = [NSMutableDictionary new];
     NSMutableDictionary *scan = [NSMutableDictionary new];
@@ -1861,7 +1940,7 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
     NSUInteger baseIndex = [wq_shared_scan_roots() indexOfObject:base];
     // iOS 26 lists apps and extensions from the LaunchServices database; only
     // Internal Daemons need the (long) id scan.
-    BOOL inodeOnly = !wq_system_areas_reachable() && [base isEqualToString:@"/private/var/mobile/Containers/Data/InternalDaemon"];
+    BOOL inodeOnly = [base isEqualToString:@"/private/var/mobile/Containers/Data/InternalDaemon"];
     WQScanSlot *slot = wq_scan_slot(inodeOnly);
     id owner = [NSObject new];
     dispatch_group_t group = nil;
@@ -1976,8 +2055,28 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
         wq_log(@"enumerate %@: inode bound is too large to scan safely", dir);
         return nil;
     }
-    NSArray *lists = wq_scan_children(fsid, 1, maxInode, @[base], cancellation, QOS_CLASS_USER_INITIATED,
-        progress ? ^(int64_t done, int64_t total, const NSUInteger *counts) { progress(done, total, counts[0]); } : nil);
+    WQScanCancellation *stop = nil;
+    if (dynamicBound) {
+        stop = wq_full_scan_begin(base.lastPathComponent, maxInode, wq_full_scan_estimate(maxInode, 0));
+        if (!stop) return nil;
+    }
+    // Either the caller's cancellation or the scan window's Stop ends it.
+    WQScanCancellation *either = stop ?: cancellation;
+    if (stop && cancellation) {
+        either = [WQScanCancellation new];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            while (!either.isCancelled) {
+                if (stop.isCancelled || cancellation.isCancelled) { [either cancel]; break; }
+                usleep(200000);
+            }
+        });
+    }
+    NSArray *lists = wq_scan_children(fsid, 1, maxInode, @[base], either, QOS_CLASS_USER_INITIATED, stop != nil,
+        ^(int64_t done, int64_t total, const NSUInteger *counts) {
+            if (progress) progress(done, total, counts[0]);
+            if (stop && gFullScanProgress) gFullScanProgress(done, total, NO);
+        });
+    if (stop) { wq_full_scan_end(stop); [either cancel]; }
     if (!lists) return nil;
     if (dynamicBound) wq_check_scan_completion(fsid, probeInode, dir);
     return wq_sorted_paths(lists.firstObject);
