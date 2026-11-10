@@ -162,9 +162,16 @@ typedef struct {
 static const WQLSLayout kWQLSLayouts[] = {
     { "27.0", 0x250, 0x0c, 0x68, 0x6c, 0x74, 0x00, 0x118, 0x00, 0x54 },
     { "26",   0x23c, 0x0c, 0x64, 0x68, 0x70, 0x00, 0x104, 0x00, 0x50 },
+    // iOS 27.2 (from a device's layout hint): container fields 4 bytes later
+    // than on 27.0. Whether the bundle id moved too isn't known yet, so both
+    // positions are tried; the one that maps the most containers wins.
+    { "27.2", 0x25c, 0x0c, 0x6c, 0x70, 0x78, 0x00, 0x120, 0x00, 0x58 },
+    { "27.2b", 0x25c, 0x10, 0x6c, 0x70, 0x78, 0x00, 0x120, 0x04, 0x58 },
+    { "27.2c", 0x25c, 0x0c, 0x6c, 0x70, 0x78, 0x00, 0x120, 0x04, 0x58 },
+    { "27.2d", 0x25c, 0x10, 0x6c, 0x70, 0x78, 0x00, 0x120, 0x00, 0x58 },
 };
 static const size_t kWQLSLayoutCount = sizeof(kWQLSLayouts) / sizeof(kWQLSLayouts[0]);
-static const size_t kWQLSMaxRecordSize = 0x250;
+static const size_t kWQLSMaxRecordSize = 0x25c;
 
 static uint32_t wq_rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
@@ -504,6 +511,13 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
             chosen = l;
         }
     }
+    // A few Apple apps' names, to check the name fields of a new layout.
+    NSMutableArray *samples = [NSMutableArray new];
+    for (NSString *bid in @[@"com.apple.mobilesafari", @"com.apple.Preferences", @"com.apple.camera", @"com.apple.mobilenotes"]) {
+        NSString *name = display[bid] ?: bundleName[bid];
+        if (name) [samples addObject:[NSString stringWithFormat:@"%@ = %@", bid, name]];
+    }
+    if (samples.count) wq_log(@"names: sample: %@", [samples componentsJoinedByString:@", "]);
     wq_ls_log_summary(b, n, @(kWQLSLayouts[chosen].label), layoutRecs[chosen].length / (5 * sizeof(uint32_t)),
                       layoutPlugins[chosen].length / (2 * sizeof(uint32_t)), display.count, containers.count);
     if (bundlePathsOut) *bundlePathsOut = [bundlePaths copy];
