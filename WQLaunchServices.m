@@ -525,8 +525,18 @@ static BOOL wq_parse_ls_store(NSData *data, NSDictionary **displayOut,
         NSString *name = display[bid] ?: bundleName[bid];
         if (name) [samples addObject:[NSString stringWithFormat:@"%@ = %@", bid, name]];
     }
-    if (samples.count) wq_log(@"names: sample: %@", [samples componentsJoinedByString:@", "]);
-    wq_ls_log_summary(b, n, @(kWQLSLayouts[chosen].label), layoutRecs[chosen].length / (5 * sizeof(uint32_t)),
+    // The container scan and the name loader each parse the same store; log
+    // its summary once per distinct result, not once per parse.
+    static NSString *lastSummary;
+    NSString *summary = [NSString stringWithFormat:@"%zu %zu %lu %lu", n, chosen, (unsigned long)display.count,
+                         (unsigned long)containers.count];
+    BOOL newSummary;
+    @synchronized (NSObject.class) {
+        newSummary = ![summary isEqualToString:lastSummary];
+        if (newSummary) lastSummary = summary;
+    }
+    if (newSummary && samples.count) wq_log(@"names: sample: %@", [samples componentsJoinedByString:@", "]);
+    if (newSummary) wq_ls_log_summary(b, n, @(kWQLSLayouts[chosen].label), layoutRecs[chosen].length / (5 * sizeof(uint32_t)),
                       layoutPlugins[chosen].length / (2 * sizeof(uint32_t)), display.count, containers.count);
     if (bundlePathsOut) *bundlePathsOut = [bundlePaths copy];
     if (displayOut) *displayOut = [display copy];
