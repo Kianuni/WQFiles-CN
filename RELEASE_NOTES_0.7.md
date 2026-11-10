@@ -1,37 +1,34 @@
-> **Requires:** iOS 26.0 – 26.7.2 or iOS 27. Tested on iOS 26.7.1, 27.0.1 and 27.2.
-> **Needs:** a sideloading tool that keeps the App Group entitlement. If the Log says "No App Group", re-sign with one that does; see [Signing](https://github.com/kolbicz/WQFiles#signing-the-app-group) in the README.
+> **系统要求：** iOS 26.0 – 26.7.2 或 iOS 27（实测支持 iOS 26.7.1、27.0、27.0.1 与 27.2）。
+> **签名要求：** 必须使用保留 **App Group** 权限的侧载签名工具（推荐使用 AltStore、SideStore 或 Sideloadly）。若打开应用或“运行日志”中提示“缺少 App Group 权限”，请参考 [README 签名说明](https://github.com/Kianuni/WQFiles-CN#签名注意事项必读关于-app-group-权限) 重新签名。
 
-# Worse Query Files 0.7
+# WQ Files（简体中文全量汉化版）v0.7 (Build 26)
 
-## iOS 27.2: app names are back
+## 全量简体中文汉化与体验增强
 
-On iOS 27.2, apps and extensions showed up as long IDs without names, and the Cache Cleaner couldn't clean anything ([#1](https://github.com/kolbicz/WQFiles/issues/1), [#7](https://github.com/kolbicz/WQFiles/issues/7), [#8](https://github.com/kolbicz/WQFiles/issues/8), [#9](https://github.com/kolbicz/WQFiles/issues/9)). iOS 27.2 stores the app database differently; WQ Files now reads it, and finds out which apps the containers belong to from it.
+- **100% 全量界面与提示汉化**：完整汉化首页容器分类、文件浏览器、树形 Plist 编辑器、分页十六进制查看/编辑器、应用管理（备份/恢复/清空/ZIP 导出）、缓存与崩溃日志清理器、系统共享组探测以及全部安全校验与中断恢复提示。
+- **内置 Apple 系统应用中文名称表**：完整本地化近百项 Apple 原生应用与系统后台服务名称（在 iOS 27 上无需调用受限 API 即可直接显示熟悉的中文应用名）。
+- **新增现代设备型号识别**：支持识别并展示 iPhone 18 / 18 Pro / 18 Pro Max 等新型号名称。
 
-## iOS 26 is supported (26.0 – 26.7.2)
+## 同步上游 v0.7 核心更新
 
-- **Apps, Extension Data and App Groups are listed from the app database.** A full scan would take most of an hour on iOS 26; the database is found once and remembered.
-- **Internal Daemons** need a full scan on iOS 26. The first one takes long and shows the time left; later ones only check new files.
-- **Icons** are loaded from the app itself where iOS 26 hands out only a placeholder.
-- System Data and System Groups can't be reached on iOS 26 and are hidden.
+- **恢复 iOS 27.2 应用名称与缓存清理**：适配 iOS 27.2 新的 `LaunchServices` 数据库记录偏移布局，自动映射容器路径与应用名称。
+- **正式支持 iOS 26（26.0 – 26.7.2）**：
+  - 应用数据、扩展插件数据与 App Groups 直接通过应用数据库秒级加载，无需漫长扫描。
+  - 在系统仅返回空白占位图标时，自动从应用 Bundle 中提取原始高清图标。
+- **大幅提速且可持久化的扫描**：仅首次需要完整扫描，后续仅增量检查新建文件 ID；切换页面不会丢弃正在进行的后台扫描。
+- **支持滑动删除**：在文件浏览器中左滑或右滑条目即可触发带安全确认与自动备份的删除操作。
 
-## Faster scans
+## AltStore / SideStore 软件源
 
-- **Only the first scan is slow.** Found containers are remembered; later scans check only files created since, with a full scan once a week.
-- **Leaving a screen no longer throws a scan away.** It keeps running, and the next screen uses the result.
-- **Folder lists show progress** while containers are read ("Reading containers… 120 of 360").
+```text
+https://raw.githubusercontent.com/Kianuni/WQFiles-CN/main/source.json
+```
 
-## New
+## 致谢与协议
 
-- **Swipe to delete.** Swipe a row left or right in the file browser to delete it. It asks first, like the long-press menu, and files are backed up before they're deleted.
+- 上游原项目：[kolbicz/WQFiles](https://github.com/kolbicz/WQFiles)（作者：kolbicz）
+- 底层沙盒技术：[forcequitOS/worse_query](https://github.com/forcequitOS/worse_query)（作者：Taj C / forcequit）
+- 容器枚举思路：[murk-sus/kamui-escape](https://github.com/murk-sus/kamui-escape)（作者：murk-sus）
+- 开源协议：`GPL-3.0-or-later`
 
-## Fixed
-
-- **Access that didn't work is noticed.** On some setups iOS handed out access that didn't actually open the folders, so nothing had a name. WQ Files now checks every access and falls back to the other access method when needed.
-- **The Log says more:** how long a scan took, which apps refused access, and how the app database was read.
-- **A cancelled scan** is no longer reported as "no containers found".
-
-## Credit
-
-Sandbox technique: [worse_query](https://github.com/forcequitOS/worse_query) by Taj C (forcequit). Container enumeration: [KAMUI](https://github.com/murk-sus/kamui-escape) by murk-sus. Thanks to everyone who sent Logs from iOS 26 and 27.2. GPL-3.0-or-later.
-
-SHA-256 of WQFiles.ipa: `a02167446b03bca24b688bd33d57b4bec967f637e854084aba60e808df4fdaa3`
+`WQFiles.ipa` SHA-256：`eec26d35db8589a6238131f1959c2b3f0098458df46bdbdba68e8e0f51f1a75a`

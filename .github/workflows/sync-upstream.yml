@@ -1,0 +1,181 @@
+name: Sync Upstream (kolbicz/WQFiles)
+
+on:
+  schedule:
+    # 每天北京时间 10:17 自动检查上游是否有更新
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    name: 检查并同步上游 kolbicz/WQFiles
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream (kolbicz/WQFiles)
+        id: check
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/kolbicz/WQFiles.git || git remote set-url upstream https://github.com/kolbicz/WQFiles.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo "当前已包含上游最新提交 ($(git rev-parse --short upstream/main))，无需同步。"
+            exit 0
+          fi
+
+          UPSTREAM_SHA=$(git rev-parse --short upstream/main)
+          echo "has_updates=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "branch=sync/upstream-$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "changelog<<EOF"
+            git log HEAD..upstream/main --oneline --no-decorate
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attempt 3-way merge & identify new UI strings
+        id: merge
+        if: steps.check.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.check.outputs.branch }}"
+          UPSTREAM_SHA="${{ steps.check.outputs.upstream_sha }}"
+
+          # 如果已存在相同上游提交的开启 PR，直接跳过避免重复创建
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "已存在开启的同步 PR #$EXISTING_PR，跳过重复操作。"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          git checkout -B "$BRANCH"
+
+          # 提取上游本次新增的 Objective-C 字符串字面量，方便检查是否需要补充汉化
+          BASE_SHA=$(git merge-base HEAD upstream/main)
+          git diff "$BASE_SHA..upstream/main" -- '*.m' '*.h' \
+            | grep -E '^\+.*@"[A-Za-z]' \
+            | head -n 40 > /tmp/new_strings.txt || true
+
+          git merge --no-commit --no-ff upstream/main || true
+          # 自动保留本仓库的中文 README.md 与 source.json（避免上游发版更新文档/软件源导致假冲突）
+          git checkout --ours -- README.md source.json 2>/dev/null || true
+          git add README.md source.json
+
+          REMAINING_CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+          if [[ -z "$REMAINING_CONFLICTS" ]]; then
+            git commit -m "chore(sync): 合并上游 kolbicz/WQFiles 更新 ($UPSTREAM_SHA)"
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$REMAINING_CONFLICTS" > /tmp/conflicts.txt
+            git merge --abort || true
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run full test suite & build IPA on macOS
+        id: build
+        if: steps.check.outputs.has_updates == 'true' && steps.merge.outputs.skip == 'false' && steps.merge.outputs.merged == 'true'
+        run: |
+          if ./build.sh; then
+            echo "build_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload preview IPA artifact
+        if: steps.build.outputs.build_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: WQFiles-sync-${{ steps.check.outputs.upstream_sha }}
+          path: WQFiles.ipa
+
+      - name: Create Sync Pull Request (Clean Merge)
+        if: steps.check.outputs.has_updates == 'true' && steps.merge.outputs.skip == 'false' && steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.check.outputs.branch }}"
+          UPSTREAM_SHA="${{ steps.check.outputs.upstream_sha }}"
+          BUILD_STATUS="${{ steps.build.outputs.build_ok == 'true' && '✅ 编译与全套回归测试通过' || '⚠️ 编译或回归测试需人工检查（可能包含新增英文 UI 断言）' }}"
+
+          git push -f origin "$BRANCH"
+
+          BODY_FILE=/tmp/pr_body.md
+          {
+            echo "## 上游同步更新 (\`$UPSTREAM_SHA\`)"
+            echo ""
+            echo "- **上游仓库**：https://github.com/kolbicz/WQFiles"
+            echo "- **自动合并状态**：✅ 无代码冲突"
+            echo "- **构建与测试状态**：$BUILD_STATUS"
+            echo ""
+            echo "### 上游新增提交"
+            echo '```text'
+            echo "${{ steps.check.outputs.changelog }}"
+            echo '```'
+            echo ""
+            if [[ -s /tmp/new_strings.txt ]]; then
+              echo "### 检测到上游新增英文文案（建议合并前确认是否需补充汉化）"
+              echo '```objc'
+              cat /tmp/new_strings.txt
+              echo '```'
+            else
+              echo "### 新增英文文案检查"
+              echo "未检测到明显的上游新增英文 UI 字符串，可直接合并发布。"
+            fi
+          } > "$BODY_FILE"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(sync): 同步上游 kolbicz/WQFiles 更新 ($UPSTREAM_SHA)" \
+            --body-file "$BODY_FILE"
+
+      - name: Notify via Issue on Merge Conflict
+        if: steps.check.outputs.has_updates == 'true' && steps.merge.outputs.skip == 'false' && steps.merge.outputs.merged == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_SHA="${{ steps.check.outputs.upstream_sha }}"
+          TITLE="🔔 上游更新提醒：kolbicz/WQFiles ($UPSTREAM_SHA) 待合并汉化"
+          EXISTING_ISSUE=$(gh issue list --search "$UPSTREAM_SHA in:title" --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$EXISTING_ISSUE" ]]; then
+            echo "已存在提醒 Issue #$EXISTING_ISSUE，跳过重复创建。"
+            exit 0
+          fi
+
+          BODY_FILE=/tmp/issue_body.md
+          {
+            echo "检测到上游仓库 [kolbicz/WQFiles](https://github.com/kolbicz/WQFiles) 发布了新提交 (\`$UPSTREAM_SHA\`)，且修改了已汉化区域的相邻代码，需要人工/AI 辅助合并并补全汉化。"
+            echo ""
+            echo "### 上游新增提交"
+            echo '```text'
+            echo "${{ steps.check.outputs.changelog }}"
+            echo '```'
+            echo ""
+            echo "### 涉及汉化冲突的文件"
+            echo '```text'
+            cat /tmp/conflicts.txt
+            echo '```'
+            echo ""
+            echo "### 本地一键拉取命令"
+            echo '```bash'
+            echo "./scripts/sync_upstream.sh"
+            echo '```'
+          } > "$BODY_FILE"
+
+          gh issue create --title "$TITLE" --body-file "$BODY_FILE"

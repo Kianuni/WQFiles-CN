@@ -40,7 +40,7 @@ static void TestPreviewAndSerializedLimits(void)
     NSString *preview = WQPBoundedStringPreview(longString);
     WQCheck(preview.length <= WQPMaxDisplayedStringCharacters);
     WQCheck([preview containsString:@"…"]);
-    WQCheck([WQPBoundedStringPreview(@"") isEqualToString:@"(empty)"]);
+    WQCheck([WQPBoundedStringPreview(@"") isEqualToString:@"（空）"]);
     WQCheck(WQPBoundedStringPreview(@"short").length == 5);
 
     NSData *atLimit = [NSMutableData dataWithLength:WQPMaxSerializedBytes];

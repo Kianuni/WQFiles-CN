@@ -204,7 +204,7 @@ def update_catalog(
         "buildVersion": artifact["build"],
         "date": datetime.date.today().isoformat(),
         "size": os.path.getsize(ipa),
-        "downloadURL": f"https://github.com/kolbicz/WQFiles/releases/download/v{artifact['version']}/WQFiles.ipa",
+        "downloadURL": f"https://github.com/Kianuni/WQFiles-CN/releases/download/v{artifact['version']}/WQFiles.ipa",
         "localizedDescription": notes,
         # This is deliberately taken from the IPA, never from the old entry.
         "minOSVersion": artifact["minimum_os"],

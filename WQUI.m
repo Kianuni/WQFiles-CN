@@ -14,7 +14,7 @@
 NSString *wq_device_line(void)
 {
     struct utsname u;
-    NSString *machine = (uname(&u) == 0) ? @(u.machine) : @"unknown";
+    NSString *machine = (uname(&u) == 0) ? @(u.machine) : @"未知设备";
     char build[64] = {0};
     size_t len = sizeof(build);
     NSString *buildStr = (sysctlbyname("kern.osversion", build, &len, NULL, 0) == 0) ? @(build) : nil;
@@ -23,6 +23,8 @@ NSString *wq_device_line(void)
         @"iPhone17,3": @"iPhone 16", @"iPhone17,4": @"iPhone 16 Plus", @"iPhone17,5": @"iPhone 16e",
         @"iPhone18,1": @"iPhone 17 Pro", @"iPhone18,2": @"iPhone 17 Pro Max",
         @"iPhone18,3": @"iPhone 17", @"iPhone18,4": @"iPhone Air",
+        @"iPhone19,1": @"iPhone 18 Pro", @"iPhone19,2": @"iPhone 18 Pro Max",
+        @"iPhone19,3": @"iPhone 18", @"iPhone19,4": @"iPhone Air 2",
     };
     NSString *marketing = names[machine];
     NSString *model = marketing ? [NSString stringWithFormat:@"%@ (%@)", marketing, machine] : machine;
@@ -273,7 +275,7 @@ void wq_alert(UIViewController *host, NSString *title, NSString *message)
     if (host.presentedViewController && !host.presentedViewController.isBeingDismissed) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [host presentViewController:alert animated:YES completion:nil];
 }
 

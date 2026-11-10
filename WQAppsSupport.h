@@ -52,39 +52,39 @@ static inline BOOL WQAppsSupportManifestFields(NSDictionary *manifest, NSString 
                                         NSArray<NSString *> **partsOut, NSString **errorOut)
 {
     if (![manifest isKindOfClass:NSDictionary.class]) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest is not a dictionary");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单不是有效的字典");
     }
     if (!WQAppsSupportIsBool(manifest[@"Complete"]) || ![manifest[@"Complete"] boolValue]) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest is not marked complete");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单未标记为已完成");
     }
     if (!WQAppsSupportIsInteger(manifest[@"Format"]) || [manifest[@"Format"] unsignedIntegerValue] != 1) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest format is unsupported");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单格式不受支持");
     }
     if (![manifest[@"BundleID"] isKindOfClass:NSString.class] ||
         ![(NSString *)manifest[@"BundleID"] length] ||
         ![(NSString *)manifest[@"BundleID"] isEqualToString:bundleID]) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest belongs to another app");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单属于其他应用");
     }
     if (![manifest[@"Created"] isKindOfClass:NSDate.class]) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest has no valid creation timestamp");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单缺少有效的创建时间戳");
     }
     id reason = manifest[@"Reason"];
     if (reason && ![reason isKindOfClass:NSString.class]) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest reason is malformed");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单中的原因字段格式无效");
     }
     id sequence = manifest[@"Sequence"];
     if (sequence && (!WQAppsSupportIsInteger(sequence) || [sequence compare:@1] == NSOrderedAscending)) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest sequence is malformed");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单中的序号字段格式无效");
     }
     NSArray *parts = manifest[@"Parts"];
     if (![parts isKindOfClass:NSArray.class]) {
-        return WQAppsSupportManifestFailure(errorOut, @"The backup manifest parts are malformed");
+        return WQAppsSupportManifestFailure(errorOut, @"备份清单中的目录部件字段格式无效");
     }
     NSSet *allowed = [NSSet setWithObjects:@"Documents", @"Library", nil];
     NSMutableSet *seen = [NSMutableSet setWithCapacity:parts.count];
     for (id part in parts) {
         if (![part isKindOfClass:NSString.class] || ![allowed containsObject:part] || [seen containsObject:part]) {
-            return WQAppsSupportManifestFailure(errorOut, @"The backup manifest contains an invalid or duplicate part");
+            return WQAppsSupportManifestFailure(errorOut, @"备份清单包含无效或重复的目录部件");
         }
         [seen addObject:part];
     }
@@ -94,17 +94,17 @@ static inline BOOL WQAppsSupportManifestFields(NSDictionary *manifest, NSString 
     id hashes = manifest[@"PartHashes"];
     if (hashes) {
         if (![hashes isKindOfClass:NSDictionary.class]) {
-            return WQAppsSupportManifestFailure(errorOut, @"The backup manifest hashes are malformed");
+            return WQAppsSupportManifestFailure(errorOut, @"备份清单中的哈希字段格式无效");
         }
         NSDictionary *partHashes = hashes;
         if (![[NSSet setWithArray:partHashes.allKeys] isEqualToSet:seen]) {
-            return WQAppsSupportManifestFailure(errorOut, @"The backup manifest hashes do not match its parts");
+            return WQAppsSupportManifestFailure(errorOut, @"备份清单中的哈希值与目录部件不匹配");
         }
         for (id key in partHashes) {
             id hash = partHashes[key];
             if (![key isKindOfClass:NSString.class] || ![allowed containsObject:key] ||
                 ![hash isKindOfClass:NSString.class] || ![hash length]) {
-                return WQAppsSupportManifestFailure(errorOut, @"The backup manifest has an invalid part hash");
+                return WQAppsSupportManifestFailure(errorOut, @"备份清单包含无效的目录部件哈希值");
             }
         }
     }
@@ -138,16 +138,16 @@ static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeI
             if (exists) *exists = NO;
             return @"<missing>";
         }
-        if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect %@", path.lastPathComponent];
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"无法检查 %@", path.lastPathComponent];
         return nil;
     }
     if (!S_ISDIR(rootStat.st_mode)) {
-        if (errorOut) *errorOut = [NSString stringWithFormat:@"%@ is not a directory", path.lastPathComponent];
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"%@ 不是目录", path.lastPathComponent];
         return nil;
     }
     NSError *listError = nil;
     if (![NSFileManager.defaultManager contentsOfDirectoryAtPath:path error:&listError]) {
-        if (errorOut) *errorOut = listError.localizedDescription ?: [NSString stringWithFormat:@"Cannot read %@", path.lastPathComponent];
+        if (errorOut) *errorOut = listError.localizedDescription ?: [NSString stringWithFormat:@"无法读取 %@", path.lastPathComponent];
         return nil;
     }
     if (exists) *exists = YES;
@@ -163,14 +163,14 @@ static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeI
         NSString *item = [path stringByAppendingPathComponent:relative];
         struct stat itemStat;
         if (lstat(item.fileSystemRepresentation, &itemStat) != 0) {
-            if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect %@", relative];
+            if (errorOut) *errorOut = [NSString stringWithFormat:@"无法检查 %@", relative];
             return nil;
         }
         unsigned type = (unsigned)(itemStat.st_mode & S_IFMT);
         const char *name = relative.UTF8String;
         NSUInteger nameLength = name ? strlen(name) : 0;
         if (!name) {
-            if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot encode %@", relative];
+            if (errorOut) *errorOut = [NSString stringWithFormat:@"无法编码路径 %@", relative];
             return nil;
         }
         uint8_t tag = includeIdentity ? 'I' : 'S';
@@ -191,7 +191,7 @@ static inline NSString *WQAppsSupportTreeSignature(NSString *path, BOOL includeI
             char target[PATH_MAX];
             ssize_t length = readlink(item.fileSystemRepresentation, target, sizeof(target) - 1);
             if (length < 0 || length >= (ssize_t)sizeof(target) - 1) {
-                if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect link %@", relative];
+                if (errorOut) *errorOut = [NSString stringWithFormat:@"无法检查符号链接 %@", relative];
                 return nil;
             }
             WQAppsSupportHashBlob(&ctx, target, (NSUInteger)length);
@@ -215,16 +215,16 @@ static inline NSString *WQAppsSupportTreeContentSignature(NSString *path, BOOL *
             if (exists) *exists = NO;
             return @"<missing>";
         }
-        if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect %@", path.lastPathComponent];
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"无法检查 %@", path.lastPathComponent];
         return nil;
     }
     if (!S_ISDIR(rootStat.st_mode)) {
-        if (errorOut) *errorOut = [NSString stringWithFormat:@"%@ is not a directory", path.lastPathComponent];
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"%@ 不是目录", path.lastPathComponent];
         return nil;
     }
     NSError *listError = nil;
     if (![NSFileManager.defaultManager contentsOfDirectoryAtPath:path error:&listError]) {
-        if (errorOut) *errorOut = listError.localizedDescription ?: [NSString stringWithFormat:@"Cannot read %@", path.lastPathComponent];
+        if (errorOut) *errorOut = listError.localizedDescription ?: [NSString stringWithFormat:@"无法读取 %@", path.lastPathComponent];
         return nil;
     }
     if (exists) *exists = YES;
@@ -241,12 +241,12 @@ static inline NSString *WQAppsSupportTreeContentSignature(NSString *path, BOOL *
         NSString *item = [path stringByAppendingPathComponent:relative];
         struct stat itemStat;
         if (lstat(item.fileSystemRepresentation, &itemStat) != 0) {
-            if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect %@", relative];
+            if (errorOut) *errorOut = [NSString stringWithFormat:@"无法检查 %@", relative];
             return nil;
         }
         const char *name = relative.UTF8String;
         if (!name) {
-            if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot encode %@", relative];
+            if (errorOut) *errorOut = [NSString stringWithFormat:@"无法编码路径 %@", relative];
             return nil;
         }
         uint8_t tag = 'C';
@@ -258,7 +258,7 @@ static inline NSString *WQAppsSupportTreeContentSignature(NSString *path, BOOL *
         if (S_ISREG(itemStat.st_mode)) {
             int fd = open(item.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
             if (fd < 0) {
-                if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot read %@", relative];
+                if (errorOut) *errorOut = [NSString stringWithFormat:@"无法读取 %@", relative];
                 return nil;
             }
             struct stat after;
@@ -285,7 +285,7 @@ static inline NSString *WQAppsSupportTreeContentSignature(NSString *path, BOOL *
             int err = errno;
             close(fd);
             if (!ok) {
-                if (errorOut) *errorOut = [NSString stringWithFormat:@"%@ changed while it was read", relative];
+                if (errorOut) *errorOut = [NSString stringWithFormat:@"%@ 在读取过程中发生了变化", relative];
                 errno = err;
                 return nil;
             }
@@ -293,7 +293,7 @@ static inline NSString *WQAppsSupportTreeContentSignature(NSString *path, BOOL *
             char target[PATH_MAX];
             ssize_t length = readlink(item.fileSystemRepresentation, target, sizeof(target) - 1);
             if (length < 0 || length >= (ssize_t)sizeof(target) - 1) {
-                if (errorOut) *errorOut = [NSString stringWithFormat:@"Cannot inspect link %@", relative];
+                if (errorOut) *errorOut = [NSString stringWithFormat:@"无法检查符号链接 %@", relative];
                 return nil;
             }
             WQAppsSupportHashBlob(&ctx, target, (NSUInteger)length);
@@ -356,11 +356,11 @@ static inline WQAppsSupportJournalState WQAppsSupportJournalStateForDictionary(N
 static inline BOOL WQAppsSupportJournalAllowsNewRestore(WQAppsSupportJournalState state, NSString **error)
 {
     if (state == WQAppsSupportJournalActive) {
-        if (error) *error = @"An interrupted restore is still active. Recover or discard it before starting another restore";
+        if (error) *error = @"存在尚未完成的中断恢复任务，请先完成自动恢复或清理后再执行新的恢复操作";
         return NO;
     }
     if (state == WQAppsSupportJournalUnknown) {
-        if (error) *error = @"The existing restore recovery journal has an unknown state";
+        if (error) *error = @"现有的恢复保护日志处于未知状态";
         return NO;
     }
     return YES;

@@ -43,18 +43,18 @@ static inline NSString *WQPlistFormatName(NSPropertyListFormat format)
 {
     switch (format) {
         case NSPropertyListXMLFormat_v1_0: return @"XML";
-        case NSPropertyListBinaryFormat_v1_0: return @"Binary";
+        case NSPropertyListBinaryFormat_v1_0: return @"二进制";
         case NSPropertyListOpenStepFormat: return @"OpenStep";
-        default: return @"Unknown";
+        default: return @"未知";
     }
 }
 
 static inline NSString *WQPBoundedStringPreview(NSString *value)
 {
-    if (value.length == 0) return @"(empty)";
+    if (value.length == 0) return @"（空）";
     if (value.length <= WQPMaxDisplayedStringCharacters) return value;
 
-    NSString *suffix = [NSString stringWithFormat:@" … (%lu chars)", (unsigned long)value.length];
+    NSString *suffix = [NSString stringWithFormat:@" …（%lu 个字符）", (unsigned long)value.length];
     NSUInteger prefixLength = suffix.length < WQPMaxDisplayedStringCharacters
         ? WQPMaxDisplayedStringCharacters - suffix.length : 0;
     return [[value substringToIndex:prefixLength] stringByAppendingString:suffix];
@@ -80,7 +80,7 @@ static inline BOOL WQPlistIsKeyedArchiveUID(id value)
 static inline id _Nullable WQPlistImmutableCopy(id value, NSString *_Nullable *_Nullable errorOut)
 {
     if (!value) {
-        if (errorOut) *errorOut = @"The property list contains a nil value.";
+        if (errorOut) *errorOut = @"属性列表中包含空值 (nil)。";
         return nil;
     }
     if (WQPlistIsKeyedArchiveUID(value)) return value;
@@ -89,7 +89,7 @@ static inline id _Nullable WQPlistImmutableCopy(id value, NSString *_Nullable *_
         NSMutableDictionary *copy = [NSMutableDictionary dictionaryWithCapacity:source.count];
         for (id key in source) {
             if (![key isKindOfClass:NSString.class]) {
-                if (errorOut) *errorOut = @"A dictionary key is not a string.";
+                if (errorOut) *errorOut = @"字典的键不是字符串类型。";
                 return nil;
             }
             id child = WQPlistImmutableCopy(source[key], errorOut);
@@ -112,7 +112,7 @@ static inline id _Nullable WQPlistImmutableCopy(id value, NSString *_Nullable *_
         [value isKindOfClass:NSDate.class] || [value isKindOfClass:NSData.class]) {
         return [value copy];
     }
-    if (errorOut) *errorOut = @"The property list contains an unsupported value.";
+    if (errorOut) *errorOut = @"属性列表中包含不受支持的值类型。";
     return nil;
 }
 
