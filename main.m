@@ -23,6 +23,7 @@
 #import "WQPlistEditor.h"
 #import "WQPlistEditorSupport.h"
 #import "WQHexViewer.h"
+#import "WQSQLiteViewer.h"
 
 static BOOL wq_looks_like_uuid(NSString *name)
 {
@@ -52,6 +53,7 @@ static BOOL wq_regular_file_for_ui(NSString *path)
 @property (nonatomic) mode_t mode;
 @property (nonatomic) uid_t uid;
 @property (nonatomic, strong) NSDate *modified;
+@property (nonatomic, strong) NSDate *created;
 @end
 
 @implementation WQItem
@@ -59,7 +61,7 @@ static BOOL wq_regular_file_for_ui(NSString *path)
 
 #pragma mark - File viewer
 
-typedef NS_ENUM(NSInteger, WQOpenMode) { WQOpenAuto, WQOpenPlist, WQOpenText, WQOpenHex };
+typedef NS_ENUM(NSInteger, WQOpenMode) { WQOpenAuto, WQOpenPlist, WQOpenText, WQOpenHex, WQOpenSQLite };
 // Opens a file in the fitting viewer (Auto: chosen from its first bytes).
 static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readOnly, WQOpenMode mode);
 
@@ -170,6 +172,8 @@ static NSString *wq_file_hex_dump(NSData *data, BOOL truncated)
                           handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenPlist]; }],
         [UIAction actionWithTitle:@"Hex Viewer" image:[UIImage systemImageNamed:@"number"] identifier:nil
                           handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenHex]; }],
+        [UIAction actionWithTitle:@"SQLite Viewer" image:[UIImage systemImageNamed:@"tablecells"] identifier:nil
+                          handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenSQLite]; }],
     ]];
     UIBarButtonItem *more = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:openAs];
     self.navigationItem.rightBarButtonItems = @[share, more];
@@ -419,6 +423,7 @@ static WQOpenMode wq_sniff(NSData *head)
     const uint8_t *b = head.bytes;
     NSUInteger n = head.length;
     if (n >= 7 && memcmp(b, "bplist0", 7) == 0) return WQOpenPlist;
+    if (wq_is_sqlite_header(head)) return WQOpenSQLite;
     if ((n >= 8 && memcmp(b, "\x89PNG", 4) == 0) || (n >= 3 && b[0] == 0xff && b[1] == 0xd8 && b[2] == 0xff) ||
         (n >= 4 && memcmp(b, "GIF8", 4) == 0) || (n >= 12 && memcmp(b + 4, "ftyp", 4) == 0))
         return WQOpenText;   // images: the file viewer renders them
@@ -453,6 +458,8 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
             vc = editor;
         } else if (m == WQOpenHex) {
             vc = [[WQHexViewController alloc] initWithPath:path readOnly:readOnly];
+        } else if (m == WQOpenSQLite) {
+            vc = [[WQSQLiteViewController alloc] initWithPath:path];
         } else {
             WQFileViewController *file = [[WQFileViewController alloc] initWithPath:path];
             file.readOnly = readOnly;
@@ -492,6 +499,80 @@ static NSString *wq_folder_date_text(NSDate *date)
     return date ? [formatter stringFromDate:date] : @"";
 }
 
+#pragma mark - Folder sorting
+
+// One sort order for all folders, remembered. Each key starts in its natural
+// direction (A–Z, newest first, largest first); picking it again reverses it.
+typedef NS_ENUM(NSInteger, WQSortKey) { WQSortName, WQSortModified, WQSortCreated, WQSortSize };
+static NSString *const kWQSortKeyPref = @"WQFolderSortKey";
+static NSString *const kWQSortAscendingPref = @"WQFolderSortAscending";
+static NSString *const kWQFoldersFirstPref = @"WQFolderSortFoldersFirst";
+
+static WQSortKey wq_sort_key(void)
+{
+    NSInteger key = [NSUserDefaults.standardUserDefaults integerForKey:kWQSortKeyPref];
+    return key >= WQSortName && key <= WQSortSize ? (WQSortKey)key : WQSortName;
+}
+
+static BOOL wq_sort_ascending(void)
+{
+    id value = [NSUserDefaults.standardUserDefaults objectForKey:kWQSortAscendingPref];
+    return value ? [value boolValue] : YES;
+}
+
+static BOOL wq_folders_first(void)
+{
+    id value = [NSUserDefaults.standardUserDefaults objectForKey:kWQFoldersFirstPref];
+    return value ? [value boolValue] : YES;
+}
+
+static void wq_choose_sort(WQSortKey key)
+{
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    BOOL ascending = key == wq_sort_key() ? !wq_sort_ascending() : key == WQSortName;
+    [d setInteger:key forKey:kWQSortKeyPref];
+    [d setBool:ascending forKey:kWQSortAscendingPref];
+}
+
+static NSString *wq_sort_direction_text(WQSortKey key, BOOL ascending)
+{
+    switch (key) {
+        case WQSortName: return ascending ? @"A–Z" : @"Z–A";
+        case WQSortSize: return ascending ? @"Smallest first" : @"Largest first";
+        default: return ascending ? @"Oldest first" : @"Newest first";
+    }
+}
+
+static NSArray<WQItem *> *wq_sorted_items(NSArray<WQItem *> *items)
+{
+    WQSortKey key = wq_sort_key();
+    BOOL ascending = wq_sort_ascending(), foldersFirst = wq_folders_first();
+    return [items sortedArrayUsingComparator:^NSComparisonResult(WQItem *a, WQItem *b) {
+        if (foldersFirst && a.isDir != b.isDir) return a.isDir ? NSOrderedAscending : NSOrderedDescending;
+        NSComparisonResult r = NSOrderedSame;
+        switch (key) {
+            case WQSortName: break;
+            case WQSortModified: r = [(a.modified ?: NSDate.distantPast) compare:(b.modified ?: NSDate.distantPast)]; break;
+            case WQSortCreated: r = [(a.created ?: NSDate.distantPast) compare:(b.created ?: NSDate.distantPast)]; break;
+            case WQSortSize: r = a.size < b.size ? NSOrderedAscending : a.size > b.size ? NSOrderedDescending : NSOrderedSame; break;
+        }
+        NSComparisonResult byName = [(a.label ?: a.name ?: @"") localizedStandardCompare:(b.label ?: b.name ?: @"")];
+        if (key == WQSortName) r = byName;
+        if (r == NSOrderedSame) return byName;
+        return ascending ? r : (NSComparisonResult)-r;
+    }];
+}
+
+// Sidebar letter for an entry: its first letter without accents, "#" for the rest.
+static NSString *wq_index_letter(NSString *name)
+{
+    if (!name.length) return @"#";
+    NSString *first = [[name substringWithRange:[name rangeOfComposedCharacterSequenceAtIndex:0]]
+                       stringByFoldingWithOptions:NSDiacriticInsensitiveSearch | NSCaseInsensitiveSearch locale:nil].uppercaseString;
+    unichar c = first.length ? [first characterAtIndex:0] : 0;
+    return (c >= 'A' && c <= 'Z') ? [NSString stringWithCharacters:&c length:1] : @"#";
+}
+
 @implementation WQDirViewController {
     NSString *_path;
     NSArray<WQItem *> *_all;     // everything in the folder
@@ -518,6 +599,8 @@ static NSString *wq_folder_date_text(NSDate *date)
     BOOL _scanInFlight;
     BOOL _scanNeedsRefresh;
     NSTimeInterval _lastReloadFinished;
+    NSArray<NSString *> *_indexTitles;          // sidebar letters, when sorted by name
+    NSDictionary<NSString *, NSNumber *> *_indexRows;   // letter -> first row
 }
 
 - (instancetype)initWithPath:(NSString *)path title:(NSString *)title
@@ -556,6 +639,34 @@ static NSString *wq_folder_date_text(NSDate *date)
     }
     [menuItems addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil
                           handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = path; }]];
+    // Built when the menu opens, so the checkmarks show the current order.
+    [menuItems addObject:[UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
+        WQSortKey current = wq_sort_key();
+        BOOL ascending = wq_sort_ascending();
+        NSMutableArray *sortActions = [NSMutableArray new];
+        NSArray *titles = @[@"Name", @"Date Modified", @"Date Created", @"Size"];
+        for (NSInteger key = WQSortName; key <= WQSortSize; key++) {
+            UIAction *action = [UIAction actionWithTitle:titles[(NSUInteger)key] image:nil identifier:nil handler:^(UIAction *__unused a) {
+                wq_choose_sort((WQSortKey)key);
+                [weakSelf resortAfterChange];
+            }];
+            if (key == current) {
+                action.state = UIMenuElementStateOn;
+                action.subtitle = wq_sort_direction_text((WQSortKey)key, ascending);
+            }
+            [sortActions addObject:action];
+        }
+        UIAction *folders = [UIAction actionWithTitle:@"Folders on Top" image:nil identifier:nil handler:^(UIAction *__unused a) {
+            [NSUserDefaults.standardUserDefaults setBool:!wq_folders_first() forKey:kWQFoldersFirstPref];
+            [weakSelf resortAfterChange];
+        }];
+        folders.state = wq_folders_first() ? UIMenuElementStateOn : UIMenuElementStateOff;
+        UIMenu *order = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[folders]];
+        UIMenu *sort = [UIMenu menuWithTitle:@"Sort By" image:[UIImage systemImageNamed:@"arrow.up.arrow.down"] identifier:nil options:0
+                                    children:[sortActions arrayByAddingObject:order]];
+        sort.subtitle = [NSString stringWithFormat:@"%@, %@", titles[(NSUInteger)current], wq_sort_direction_text(current, ascending)];
+        completion(@[sort]);
+    }]];
     _menuItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
                                                  menu:[UIMenu menuWithChildren:menuItems]];
     if (_backupStorage) {
@@ -666,14 +777,49 @@ static NSString *wq_folder_date_text(NSDate *date)
 // App name, bundle or group ID, or file name; case and accents ignored.
 - (void)applyFilter
 {
-    if (!_query) { _items = _all; return; }
-    NSStringCompareOptions opts = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
-    NSString *q = _query;
-    _items = [_all filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQItem *item, NSDictionary *__unused b) {
-        for (NSString *field in @[item.label ?: @"", item.name ?: @"", item.bundleID ?: @""])
-            if ([field rangeOfString:q options:opts].location != NSNotFound) return YES;
-        return NO;
-    }]];
+    NSArray<WQItem *> *shown = _all ?: @[];
+    if (_query) {
+        NSStringCompareOptions opts = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
+        NSString *q = _query;
+        shown = [shown filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQItem *item, NSDictionary *__unused b) {
+            for (NSString *field in @[item.label ?: @"", item.name ?: @"", item.bundleID ?: @""])
+                if ([field rangeOfString:q options:opts].location != NSNotFound) return YES;
+            return NO;
+        }]];
+    }
+    _items = wq_sorted_items(shown);
+    // Alphabet sidebar: only for longer lists sorted by name.
+    NSMutableArray *titles = [NSMutableArray new];
+    NSMutableDictionary *rows = [NSMutableDictionary new];
+    if (wq_sort_key() == WQSortName && _items.count >= 25) {
+        [_items enumerateObjectsUsingBlock:^(WQItem *item, NSUInteger row, BOOL *__unused stop) {
+            NSString *letter = wq_index_letter(item.label ?: item.name);
+            if (!rows[letter]) { rows[letter] = @(row); [titles addObject:letter]; }
+        }];
+    }
+    _indexTitles = titles.count > 1 ? titles : nil;
+    _indexRows = rows;
+}
+
+- (NSArray<NSString *> *)sectionIndexTitlesForTableView:(UITableView *)tableView
+{
+    return _selectingBackups || _error ? nil : _indexTitles;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index
+{
+    NSNumber *row = _indexRows[title];
+    if (row && row.unsignedIntegerValue < _items.count)
+        [tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:row.integerValue inSection:0]
+                         atScrollPosition:UITableViewScrollPositionTop animated:NO];
+    return -1;   // already scrolled to the row; the list has one section
+}
+
+- (void)resortAfterChange
+{
+    [self applyFilter];
+    [self.tableView reloadData];
+    [self.tableView reloadSectionIndexTitles];
 }
 
 #pragma mark Backup multi-selection
@@ -910,6 +1056,7 @@ static NSString *wq_folder_date_text(NSDate *date)
                 item.mode = st.st_mode;
                 item.uid = st.st_uid;
                 item.modified = [NSDate dateWithTimeIntervalSince1970:st.st_mtimespec.tv_sec];
+                item.created = [NSDate dateWithTimeIntervalSince1970:st.st_birthtimespec.tv_sec];
             }
             if (!haveFullPaths && labels && item.isDir && wq_looks_like_uuid(name)) {
                 NSString *bid = wq_container_label(item.path);
@@ -937,10 +1084,6 @@ static NSString *wq_folder_date_text(NSDate *date)
             }
             [items addObject:item];
         }
-        [items sortUsingComparator:^NSComparisonResult(WQItem *a, WQItem *b) {
-            if (a.isDir != b.isDir) return a.isDir ? NSOrderedAscending : NSOrderedDescending;
-            return [(a.label ?: a.name) localizedCaseInsensitiveCompare:(b.label ?: b.name)];
-        }];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != self->_scanGeneration) return;
             self->_scanInFlight = NO;
@@ -990,7 +1133,9 @@ static NSString *wq_folder_date_text(NSDate *date)
     }
     WQItem *item = _items[(NSUInteger)indexPath.row];
     c.text = item.label ?: item.name;
-    NSString *date = wq_folder_date_text(item.modified);
+    BOOL byCreated = wq_sort_key() == WQSortCreated;
+    NSString *date = wq_folder_date_text(byCreated ? item.created : item.modified);
+    if (byCreated) date = [@"created " stringByAppendingString:date];
     NSString *detail = item.isDir ? date : [NSString stringWithFormat:@"%@ · %@", wq_size_text(item.size), date];
     if (item.label) detail = [NSString stringWithFormat:@"%@\n%@", item.name, detail];
     if (item.isLink) detail = [@"symlink · " stringByAppendingString:detail];
@@ -1167,6 +1312,8 @@ static NSString *wq_folder_date_text(NSDate *date)
                                   handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenText); }],
                 [UIAction actionWithTitle:@"Hex Viewer" image:[UIImage systemImageNamed:@"number"] identifier:nil
                                   handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenHex); }],
+                [UIAction actionWithTitle:@"SQLite Viewer" image:[UIImage systemImageNamed:@"tablecells"] identifier:nil
+                                  handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenSQLite); }],
             ]]];
         }
         [actions addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"]

@@ -45,13 +45,18 @@ the way KAMUI does it.
   and **Open As** switches between them. Saving writes back in place (same
   inode, owner and attributes). Create folders, import files, rename and
   delete (long-press, or swipe a row left or right; deleting always asks
-  first). Long-press a folder to share it as a ZIP.
+  first). Sort by name, date modified, date created or size from the •••
+  menu; long lists sorted by name get an A–Z sidebar. Long-press a folder to share it as a ZIP.
   - **Plist editor**: browse dictionaries and arrays, edit values by type
     (switches for booleans, numbers, text, dates, data as hex), add, delete,
     rename and reorder. Saves in the file's own format (binary or XML).
   - **Hex viewer and editor**: any file size (read in pages), go to offset,
     find hex bytes or text, overwrite bytes in place. Changed bytes are
     highlighted until saved; the file size never changes.
+  - **SQLite viewer** (read-only): tables and views with row counts, rows,
+    single rows in full, read-only SQL queries and CSV export. It works on a
+    copy of the database and its `-wal` file, so the app's own files are never
+    changed; close the app first for an up-to-date copy.
   - **Text and images**: text is editable, images render, plists can also be
     edited as XML text.
 - **Log**: file writes, backups, deletions, restores and errors the app handled, plus the App Group it received.

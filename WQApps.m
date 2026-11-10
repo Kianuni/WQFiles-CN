@@ -41,6 +41,19 @@
     WQScanCancellation *_scanCancellation;
     NSUInteger _scanGeneration;
     BOOL _scanning;
+    NSArray<NSString *> *_indexTitles;
+    NSDictionary<NSString *, NSNumber *> *_indexRows;
+}
+
+static NSString *const kWQAppsSortByNamePref = @"WQAppsSortByName";
+
+static NSString *wq_apps_index_letter(NSString *name)
+{
+    if (!name.length) return @"#";
+    NSString *first = [[name substringWithRange:[name rangeOfComposedCharacterSequenceAtIndex:0]]
+                       stringByFoldingWithOptions:NSDiacriticInsensitiveSearch | NSCaseInsensitiveSearch locale:nil].uppercaseString;
+    unichar c = first.length ? [first characterAtIndex:0] : 0;
+    return (c >= 'A' && c <= 'Z') ? [NSString stringWithCharacters:&c length:1] : @"#";
 }
 
 static NSArray<NSString *> *kAppDataParts(void) { return @[@"Documents", @"Library", @"tmp"]; }
@@ -418,6 +431,7 @@ static BOOL wq_dir_size_cancellable(NSString *dir, WQScanCancellation *cancellat
     search.searchResultsUpdater = self;
     search.obscuresBackgroundDuringPresentation = NO;
     search.searchBar.placeholder = @"Search apps";
+    self.navigationItem.rightBarButtonItem = [self sortButton];
     self.navigationItem.searchController = search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
@@ -613,14 +627,74 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
 
 - (void)rebuildVisibleApps
 {
-    if (!_query.length) {
-        _visibleApps = _apps;
-        return;
+    NSArray<WQAppItem *> *shown = _apps ?: @[];
+    if (_query.length) {
+        shown = [shown filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
+            return [a.name localizedCaseInsensitiveContainsString:self->_query] ||
+                   [a.bundleID localizedCaseInsensitiveContainsString:self->_query];
+        }]];
     }
-    _visibleApps = [_apps filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
-        return [a.name localizedCaseInsensitiveContainsString:self->_query] ||
-               [a.bundleID localizedCaseInsensitiveContainsString:self->_query];
-    }]];
+    BOOL byName = [NSUserDefaults.standardUserDefaults boolForKey:kWQAppsSortByNamePref];
+    _visibleApps = [shown sortedArrayUsingComparator:^NSComparisonResult(WQAppItem *a, WQAppItem *b) {
+        NSComparisonResult names = [(a.name ?: @"") localizedStandardCompare:(b.name ?: @"")];
+        if (byName || a.bytes == b.bytes) return names;
+        return a.bytes > b.bytes ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    // Alphabet sidebar when sorted by name.
+    NSMutableArray *titles = [NSMutableArray new];
+    NSMutableDictionary *rows = [NSMutableDictionary new];
+    if (byName && _visibleApps.count >= 25) {
+        [_visibleApps enumerateObjectsUsingBlock:^(WQAppItem *app, NSUInteger row, BOOL *__unused stop) {
+            NSString *letter = wq_apps_index_letter(app.name);
+            if (!rows[letter]) { rows[letter] = @(row); [titles addObject:letter]; }
+        }];
+    }
+    _indexTitles = titles.count > 1 ? titles : nil;
+    _indexRows = rows;
+}
+
+- (NSArray<NSString *> *)sectionIndexTitlesForTableView:(UITableView *)tableView
+{
+    return (_busy && !_apps.count) ? nil : _indexTitles;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index
+{
+    NSNumber *row = _indexRows[title];
+    if (row && row.unsignedIntegerValue < self.visibleApps.count)
+        [tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:row.integerValue inSection:0]
+                         atScrollPosition:UITableViewScrollPositionTop animated:NO];
+    return -1;   // already scrolled to the row; the list has one section
+}
+
+- (UIBarButtonItem *)sortButton
+{
+    __weak typeof(self) weakSelf = self;
+    UIDeferredMenuElement *items = [UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
+        BOOL byName = [NSUserDefaults.standardUserDefaults boolForKey:kWQAppsSortByNamePref];
+        UIAction *size = [UIAction actionWithTitle:@"Size" image:nil identifier:nil handler:^(UIAction *__unused a) {
+            [NSUserDefaults.standardUserDefaults setBool:NO forKey:kWQAppsSortByNamePref];
+            [weakSelf resortApps];
+        }];
+        UIAction *name = [UIAction actionWithTitle:@"Name" image:nil identifier:nil handler:^(UIAction *__unused a) {
+            [NSUserDefaults.standardUserDefaults setBool:YES forKey:kWQAppsSortByNamePref];
+            [weakSelf resortApps];
+        }];
+        size.state = byName ? UIMenuElementStateOff : UIMenuElementStateOn;
+        name.state = byName ? UIMenuElementStateOn : UIMenuElementStateOff;
+        size.subtitle = @"Largest first";
+        name.subtitle = @"A–Z";
+        completion(@[size, name]);
+    }];
+    return [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
+                                             menu:[UIMenu menuWithTitle:@"Sort By" children:@[items]]];
+}
+
+- (void)resortApps
+{
+    [self rebuildVisibleApps];
+    [self.tableView reloadData];
+    [self.tableView reloadSectionIndexTitles];
 }
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController
