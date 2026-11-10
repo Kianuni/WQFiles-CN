@@ -5,14 +5,16 @@ and 27. "WQ" stands for worse_query, the sandbox technique it is built on. It
 reaches other apps' and system containers with no jailbreak and no kernel
 exploit. Tested on iOS 26.7.1, 27.0.1 and 27.2.
 
-**iOS 26 (26.0 to 26.7.2):** supported since 0.7; tested on 26.7.1. worse_query reaches the app, extension, daemon and app group
+**iOS 26 (26.0 to 26.7.2):** preliminary support since 0.7; tested on 26.7.1. worse_query reaches the app, extension, daemon and app group
 containers there, but not System Data or the system groups, so WQ Files hides
 those two and the Cache Cleaner has no crash-log section. A full inode scan
 would take most of an hour on iOS 26, so App Data, Extension Data and App
 Groups are listed from the LaunchServices database instead (found once and
 remembered). Internal Daemons aren't in that database: the first scan for them
 takes long, later ones only check new files. Apps, backups, restores, clearing
-app data, the Cache Cleaner and the file browser work as on iOS 27.
+app data, the Cache Cleaner and the file browser work as on iOS 27. App icons
+don't: iOS 26 hands WQ Files only placeholder icons and doesn't let it read
+other apps' bundles, so apps show symbol tiles.
 
 ## What it opens
 
