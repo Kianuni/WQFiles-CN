@@ -101,7 +101,7 @@ static UIImage *wq_real_icon(NSString *bundleID)
 
 // The icon from the app's own bundle, for when iOS only hands out its
 // placeholder (iOS 26 refuses this app's icon requests). Reads the primary
-// icon name from Info.plist; asset catalogs load through UIImage.
+// icon names from Info.plist and loads the matching PNG files.
 static UIImage *wq_bundle_icon(NSString *bundleID)
 {
     NSString *path = wq_bundle_path_for_id(bundleID);
@@ -110,7 +110,6 @@ static UIImage *wq_bundle_icon(NSString *bundleID)
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:plistPath];
     if (!info && wq_grant(path)) info = [NSDictionary dictionaryWithContentsOfFile:plistPath];
     if (![info isKindOfClass:NSDictionary.class]) return nil;
-    NSBundle *bundle = [NSBundle bundleWithPath:path];
     NSMutableArray<NSString *> *names = [NSMutableArray new];
     for (NSString *key in @[@"CFBundleIcons", @"CFBundleIcons~ipad"]) {
         NSDictionary *primary = [info[key] isKindOfClass:NSDictionary.class] ? info[key][@"CFBundlePrimaryIcon"] : nil;
@@ -121,15 +120,15 @@ static UIImage *wq_bundle_icon(NSString *bundleID)
     }
     if ([info[@"CFBundleIconFile"] isKindOfClass:NSString.class]) [names addObject:info[@"CFBundleIconFile"]];
     [names addObjectsFromArray:@[@"AppIcon60x60", @"AppIcon"]];
+    // Only the PNG files apps ship next to their asset catalog. Loading from
+    // the catalog (UIImage imageNamed:inBundle:) aborts inside UIKit when an
+    // entry exists but can't be rendered (crash on 27.0.1, build 21).
     for (NSString *name in names) {
-        UIImage *image = bundle ? [UIImage imageNamed:name inBundle:bundle compatibleWithTraitCollection:nil] : nil;
-        if (!image) {
-            for (NSString *suffix in @[@"@3x.png", @"@2x.png", @".png"]) {
-                image = [UIImage imageWithContentsOfFile:[path stringByAppendingPathComponent:[name stringByAppendingString:suffix]]];
-                if (image) break;
-            }
+        NSString *base = name.stringByDeletingPathExtension;
+        for (NSString *suffix in @[@"@3x.png", @"@2x.png", @"@2x~ipad.png", @"~ipad.png", @".png"]) {
+            UIImage *image = [UIImage imageWithContentsOfFile:[path stringByAppendingPathComponent:[base stringByAppendingString:suffix]]];
+            if (image.CGImage) return image;
         }
-        if (image.CGImage) return image;
     }
     return nil;
 }
