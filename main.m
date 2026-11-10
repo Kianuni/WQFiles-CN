@@ -1043,7 +1043,15 @@ static NSString *wq_index_letter(NSString *name)
                     wq_log(@"label: no token for %@", item.path);
                     labelIssues++;
                 } else if (token && !bid.length && labelIssues < 3) {
-                    wq_log(@"label: no container identifier for %@", item.path);
+                    // Once per container per launch; refreshes would repeat it.
+                    static NSMutableSet<NSString *> *reported;
+                    @synchronized ([WQItem class]) {
+                        if (!reported) reported = [NSMutableSet new];
+                        if (![reported containsObject:item.path]) {
+                            [reported addObject:item.path];
+                            wq_log(@"label: no container identifier for %@", item.path);
+                        }
+                    }
                     labelIssues++;
                 }
             }

@@ -2235,8 +2235,38 @@ static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned
         if (fstatat(parent, item, &current, AT_SYMLINK_NOFOLLOW) != 0 || !WQSameObject(&before, &current)) return NO;
         rc = unlinkat(parent, item, directory ? AT_REMOVEDIR : 0);
     }
+    // A user-immutable or append-only flag (on the item or its folder) makes
+    // unlink fail with EPERM even for the owner. The owner may clear those
+    // flags, so clear them and try once more. System flags stay untouched.
+    if (rc != 0 && errno == EPERM &&
+        fstatat(parent, item, &current, AT_SYMLINK_NOFOLLOW) == 0 && WQSameObject(&before, &current)) {
+        const uint32_t userLocks = UF_IMMUTABLE | UF_APPEND;
+        struct stat parentStat = {0};
+        BOOL cleared = NO;
+        if (fstat(parent, &parentStat) == 0 && (parentStat.st_flags & userLocks))
+            cleared = fchflags(parent, parentStat.st_flags & ~userLocks) == 0;
+        if ((current.st_flags & userLocks) && !S_ISLNK(current.st_mode)) {
+            int flagsFd = openat(parent, item, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC |
+                                 (directory ? O_DIRECTORY : 0));
+            struct stat opened;
+            if (flagsFd >= 0 && fstat(flagsFd, &opened) == 0 && WQSameObject(&before, &opened) &&
+                fchflags(flagsFd, opened.st_flags & ~userLocks) == 0) cleared = YES;
+            if (flagsFd >= 0) close(flagsFd);
+        }
+        if (cleared) {
+            wq_log(@"purge: cleared lock flags (item 0x%x, folder 0x%x) on %@",
+                   current.st_flags, parentStat.st_flags, path);
+            rc = unlinkat(parent, item, directory ? AT_REMOVEDIR : 0);
+        } else {
+            errno = EPERM;
+        }
+    }
     if (rc == 0 && !directory && freed) *freed += (unsigned long long)before.st_size;
-    if (rc != 0) wq_log(@"purge: %@ -> %@", path, wq_errno(errno));
+    if (rc != 0) {
+        int err = errno;
+        wq_log(@"purge: %@ -> %@ (flags 0x%x, uid %u, mode %o)", path, wq_errno(err),
+               current.st_flags, current.st_uid, current.st_mode & 07777);
+    }
     return rc == 0;
 }
 
