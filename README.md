@@ -3,14 +3,18 @@
 **WQ Files** is a file browser, app data manager and cache cleaner for iOS 26
 and 27. "WQ" stands for worse_query, the sandbox technique it is built on. It
 reaches other apps' and system containers with no jailbreak and no kernel
-exploit. Built and tested on iOS 27.0.1.
+exploit. Built and tested on iOS 27.0.1 and 26.7.1.
 
-**iOS 26 (26.0 to 26.7.2):** worse_query reaches the app, extension, daemon
-and app group containers, but not System Data or the system groups. On iOS 26
-WQ Files therefore hides System Data and System Groups, the Cache Cleaner has
-no crash-log section, and App Groups are found by scanning. Apps, backups,
-restores, clearing app data, the Cache Cleaner and the file browser work as on
-iOS 27.
+**iOS 26 (26.0 to 26.7.2):** currently in the test builds on
+[Releases](https://github.com/kolbicz/WQFiles/releases) (0.6 requires iOS 27);
+tested on 26.7.1. worse_query reaches the app, extension, daemon and app group
+containers there, but not System Data or the system groups, so WQ Files hides
+those two and the Cache Cleaner has no crash-log section. A full inode scan
+would take most of an hour on iOS 26, so App Data, Extension Data and App
+Groups are listed from the LaunchServices database instead (found once and
+remembered). Internal Daemons aren't in that database: the first scan for them
+takes long, later ones only check new files. Apps, backups, restores, clearing
+app data, the Cache Cleaner and the file browser work as on iOS 27.
 
 ## What it opens
 
