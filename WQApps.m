@@ -46,6 +46,13 @@
 }
 
 static NSString *const kWQAppsSortByNamePref = @"WQAppsSortByName";
+// 0 all apps, 1 Apple's, 2 everyone else's, 3 apps with a backup.
+static NSString *const kWQAppsFilterPref = @"WQAppsFilter";
+
+static BOOL wq_app_is_apple(WQAppItem *app)
+{
+    return [app.bundleID hasPrefix:@"com.apple."];
+}
 
 static NSString *wq_apps_index_letter(NSString *name)
 {
@@ -605,7 +612,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
         NSString *note = nil;
-        if (!containers && wq_full_scan_was_declined()) note = @"Apps aren't listed yet: this needs a scan of all files. Pull down to start it.";
+        if (!wq_app_group()) note = @"WQ Files has no App Group, so it can't open other apps' folders. Re-sign it with a tool that keeps the App Group (see Signing in the README).";
+        else if (!containers && wq_full_scan_was_declined()) note = @"Apps aren't listed yet: this needs a scan of all files. Pull down to start it.";
         else if (!containers) note = @"Container enumeration failed. See Log for the statfs/inode reason.";
         else if (!containers.count) note = @"No app containers were found. Refresh, and check Log for the enumeration reason.";
         else if (limited || sizeLimited) note = [NSString stringWithFormat:@"%lu containers · %lu with limited access, identity, size, or no identifier. See Log.",
@@ -629,6 +637,14 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
 - (void)rebuildVisibleApps
 {
     NSArray<WQAppItem *> *shown = _apps ?: @[];
+    NSInteger filter = [NSUserDefaults.standardUserDefaults integerForKey:kWQAppsFilterPref];
+    if (filter > 0) {
+        shown = [shown filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
+            if (filter == 1) return wq_app_is_apple(a);
+            if (filter == 2) return !wq_app_is_apple(a);
+            return a.backups.count > 0;
+        }]];
+    }
     if (_query.length) {
         shown = [shown filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
             return [a.name localizedCaseInsensitiveContainsString:self->_query] ||
@@ -685,10 +701,23 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
         name.state = byName ? UIMenuElementStateOn : UIMenuElementStateOff;
         size.subtitle = @"Largest first";
         name.subtitle = @"A–Z";
-        completion(@[size, name]);
+        UIMenu *sort = [UIMenu menuWithTitle:@"Sort By" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[size, name]];
+        NSInteger current = [NSUserDefaults.standardUserDefaults integerForKey:kWQAppsFilterPref];
+        NSArray *titles = @[@"All Apps", @"Apple Apps", @"Other Apps", @"Backed Up"];
+        NSMutableArray *filters = [NSMutableArray new];
+        for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+            UIAction *f = [UIAction actionWithTitle:titles[(NSUInteger)i] image:nil identifier:nil handler:^(UIAction *__unused a) {
+                [NSUserDefaults.standardUserDefaults setInteger:i forKey:kWQAppsFilterPref];
+                [weakSelf resortApps];
+            }];
+            f.state = i == current ? UIMenuElementStateOn : UIMenuElementStateOff;
+            [filters addObject:f];
+        }
+        UIMenu *show = [UIMenu menuWithTitle:@"Show" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:filters];
+        completion(@[sort, show]);
     }];
-    return [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
-                                             menu:[UIMenu menuWithTitle:@"Sort By" children:@[items]]];
+    return [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"line.3.horizontal.decrease.circle"]
+                                             menu:[UIMenu menuWithChildren:@[items]]];
 }
 
 - (void)resortApps
@@ -696,6 +725,33 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
     [self rebuildVisibleApps];
     [self.tableView reloadData];
     [self.tableView reloadSectionIndexTitles];
+}
+
+// Long-press: copy the bundle ID or container path, open the data folder.
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
+    contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point
+{
+    if (_busy || (NSUInteger)indexPath.row >= self.visibleApps.count) return nil;
+    WQAppItem *app = self.visibleApps[(NSUInteger)indexPath.row];
+    __weak typeof(self) weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
+        actionProvider:^UIMenu *(NSArray<UIMenuElement *> *__unused suggested) {
+        NSMutableArray *actions = [NSMutableArray new];
+        if (app.bundleID.length) {
+            [actions addObject:[UIAction actionWithTitle:@"Copy Bundle ID" image:[UIImage systemImageNamed:@"tag"] identifier:nil
+                                                  handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = app.bundleID; }]];
+        }
+        [actions addObject:[UIAction actionWithTitle:@"Copy Container Path" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil
+                                              handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = app.container; }]];
+        if (app.hasAccess) {
+            [actions addObject:[UIAction actionWithTitle:@"Open Data Folder" image:[UIImage systemImageNamed:@"folder"] identifier:nil
+                                                  handler:^(UIAction *__unused a) {
+                [weakSelf.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name]
+                                                         animated:YES];
+            }]];
+        }
+        return [UIMenu menuWithChildren:actions];
+    }];
 }
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController
@@ -715,7 +771,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
     if (_status) return _status;
     unsigned long long total = 0;
     for (WQAppItem *a in _apps) total += a.bytes;
-    if (_query.length) return [NSString stringWithFormat:@"%lu of %lu apps", (unsigned long)self.visibleApps.count, (unsigned long)_apps.count];
+    if (_query.length || [NSUserDefaults.standardUserDefaults integerForKey:kWQAppsFilterPref] > 0)
+        return [NSString stringWithFormat:@"%lu of %lu apps", (unsigned long)self.visibleApps.count, (unsigned long)_apps.count];
     return [NSString stringWithFormat:@"%lu apps · %@ of app data", (unsigned long)_apps.count, wq_size_text(total)];
 }
 
@@ -814,6 +871,9 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Open Data Folder" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         [self.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name] animated:YES];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Copy Bundle ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
+        UIPasteboard.generalPasteboard.string = app.bundleID;
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];

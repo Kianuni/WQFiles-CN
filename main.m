@@ -25,6 +25,8 @@
 #import "WQHexViewer.h"
 #import "WQSQLiteViewer.h"
 #import "WQArchive.h"
+#import <AVKit/AVKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <sys/mount.h>
 
 static BOOL wq_looks_like_uuid(NSString *name)
@@ -63,7 +65,7 @@ static BOOL wq_regular_file_for_ui(NSString *path)
 
 #pragma mark - File viewer
 
-typedef NS_ENUM(NSInteger, WQOpenMode) { WQOpenAuto, WQOpenPlist, WQOpenText, WQOpenHex, WQOpenSQLite };
+typedef NS_ENUM(NSInteger, WQOpenMode) { WQOpenAuto, WQOpenPlist, WQOpenText, WQOpenHex, WQOpenSQLite, WQOpenMedia };
 // Opens a file in the fitting viewer (Auto: chosen from its first bytes).
 static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readOnly, WQOpenMode mode);
 
@@ -176,6 +178,8 @@ static NSString *wq_file_hex_dump(NSData *data, BOOL truncated)
                           handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenHex]; }],
         [UIAction actionWithTitle:@"SQLite Viewer" image:[UIImage systemImageNamed:@"tablecells"] identifier:nil
                           handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenSQLite]; }],
+        [UIAction actionWithTitle:@"Media Player" image:[UIImage systemImageNamed:@"play.rectangle"] identifier:nil
+                          handler:^(UIAction *__unused a) { [weakSelf reopenAs:WQOpenMedia]; }],
     ]];
     UIBarButtonItem *more = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:openAs];
     self.navigationItem.rightBarButtonItems = @[share, more];
@@ -441,6 +445,53 @@ static WQOpenMode wq_sniff(NSData *head)
 
 static NSUInteger wq_open_generation;
 
+// Audio and video by extension (the first bytes of MP4/MOV look like HEIC images).
+static BOOL wq_is_media_name(NSString *name)
+{
+    static NSSet<NSString *> *exts;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        exts = [NSSet setWithArray:@[@"mp3", @"m4a", @"m4b", @"aac", @"wav", @"aif", @"aiff", @"caf", @"flac", @"alac",
+                                     @"mp4", @"m4v", @"mov", @"3gp", @"3g2", @"m3u8"]];
+    });
+    return [exts containsObject:name.pathExtension.lowercaseString];
+}
+
+// The system player decodes in a separate process that can't read other
+// apps' folders, so the file is copied to WQ Files' temporary folder first
+// (the previous copy is removed).
+static void wq_open_media(UINavigationController *nav, NSString *path, BOOL (^stillWanted)(void))
+{
+    UIViewController *host = nav.topViewController;
+    UIAlertController *hud = [UIAlertController alertControllerWithTitle:@"Preparing…" message:path.lastPathComponent
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [host presentViewController:hud animated:YES completion:nil];
+    dispatch_async(wq_io(), ^{
+        NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"wq-media"];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        [fm removeItemAtPath:dir error:nil];
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString *local = [dir stringByAppendingPathComponent:path.lastPathComponent];
+        NSString *error = nil;
+        BOOL ok = wq_copy_to_local(path, local, &error);
+        wq_log(@"media: %@ -> %@", path, ok ? @"OK" : error);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            void (^show)(void) = ^{
+                if (!ok) { wq_alert(host, @"Cannot play", error ?: @"The file could not be read."); return; }
+                if (!stillWanted()) return;
+                [AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryPlayback error:nil];
+                AVPlayerViewController *player = [AVPlayerViewController new];
+                player.player = [AVPlayer playerWithURL:[NSURL fileURLWithPath:local]];
+                player.title = path.lastPathComponent;
+                [nav pushViewController:player animated:YES];
+                [player.player play];
+            };
+            if (host.presentedViewController == hud) [host dismissViewControllerAnimated:YES completion:show];
+            else show();
+        });
+    });
+}
+
 static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readOnly, WQOpenMode mode)
 {
     if (!nav || !path.length) return;
@@ -451,6 +502,10 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
     UIViewController *origin = nav.topViewController;
     void (^push)(WQOpenMode) = ^(WQOpenMode m) {
         if (request != wq_open_generation || nav.topViewController != origin) return;
+        if (m == WQOpenMedia) {
+            wq_open_media(nav, path, ^BOOL { return request == wq_open_generation && nav.topViewController == origin; });
+            return;
+        }
         UIViewController *vc;
         if (m == WQOpenPlist) {
             WQPlistEditorViewController *editor = [[WQPlistEditorViewController alloc] initWithPath:path readOnly:readOnly];
@@ -478,6 +533,7 @@ static void wq_open_file(UINavigationController *nav, NSString *path, BOOL readO
                                 : @"Only regular files can be viewed.");
         return;
     }
+    if (mode == WQOpenAuto && wq_is_media_name(path)) mode = WQOpenMedia;
     if (mode != WQOpenAuto) { push(mode); return; }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSData *head = wq_permission_hint(path, NO) ? nil : wq_read_range(path, 0, 4096, NULL);
@@ -1468,6 +1524,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
             [self applyFilter];
             self->_error = (names || childPaths != nil) ? nil
                 : (error.length ? error
+                   : !wq_app_group() ? @"WQ Files has no App Group, so it can't open other apps' folders. Re-sign it with a tool that keeps the App Group (see Signing in the README)."
                    : wq_full_scan_was_declined() ? @"Not listed yet: this needs a scan of all files. Pull down to start it."
                    : @"Cannot list this folder. Container enumeration failed; see Log.");
             self->_scanStatus = nil;
@@ -1708,6 +1765,8 @@ static NSString *wq_temp_work_dir(NSString *prefix)
                                   handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenHex); }],
                 [UIAction actionWithTitle:@"SQLite Viewer" image:[UIImage systemImageNamed:@"tablecells"] identifier:nil
                                   handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenSQLite); }],
+                [UIAction actionWithTitle:@"Media Player" image:[UIImage systemImageNamed:@"play.rectangle"] identifier:nil
+                                  handler:^(UIAction *__unused a) { WQDirViewController *strongSelf = weakSelf; WQItem *latest = currentItem(); if (strongSelf && latest) wq_open_file(strongSelf.navigationController, latest.path, ro, WQOpenMedia); }],
             ]]];
         }
         [actions addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"]

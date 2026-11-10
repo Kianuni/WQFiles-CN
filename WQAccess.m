@@ -1729,6 +1729,13 @@ BOOL wq_full_scan_was_declined(void)
 // (or the missing UI) declined.
 static WQScanCancellation *wq_full_scan_begin(NSString *what, int64_t ids, double seconds)
 {
+    // Without an App Group no container can be opened or named, so a long
+    // scan would only produce a list of unusable folders.
+    if (!wq_app_group()) {
+        atomic_store(&gFullScanDeclined, YES);
+        wq_log(@"scan: no App Group; full scan of %@ skipped", what);
+        return nil;
+    }
     if (!gFullScanConfirm || !gFullScanConfirm(what, ids, seconds)) {
         atomic_store(&gFullScanDeclined, YES);
         wq_log(@"scan: full scan of %@ not started (%lld ids, about %.0f s)", what, (long long)ids, seconds);
@@ -1853,7 +1860,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_st
         paths = gContainerListProvider(store);
         how = [NSString stringWithFormat:@"found by id in %.1f s", CFAbsoluteTimeGetCurrent() - started];
         if (paths.count < 2) {
-            wq_log(@"scan: the LaunchServices database at %@ lists no containers", store);
+            wq_log(@"scan: the LaunchServices database at %@ couldn't be read or lists no containers", store);
             return nil;
         }
     }

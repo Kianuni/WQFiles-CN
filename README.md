@@ -43,7 +43,8 @@ new files.
 - **Apps**: every app with its data size. Back up an app's **Documents and
   Library**, restore the latest backup, clear its data (Documents, Library,
   and tmp), open its folder, or share a backup as a ZIP over AirDrop, Files,
-  Mail and so on. `tmp` is intentionally ephemeral: clear removes it, but app
+  Mail and so on. Show all apps, only Apple's, only others or only backed-up
+  ones; long-press to copy the bundle ID or container path. `tmp` is intentionally ephemeral: clear removes it, but app
   backups do not include it and restore leaves the current `tmp` untouched.
 - **Cache Cleaner**: cache and temp size per app, with search, Select All /
   None / Large Caches (50 MB+) and crash logs. Long-press an app to jump to its
@@ -72,6 +73,8 @@ new files.
     single rows in full, read-only SQL queries and CSV export. It works on a
     copy of the database and its `-wal` file, so the app's own files are never
     changed; close the app first for an up-to-date copy.
+  - **Media player**: audio and video (mp3, m4a, wav, mp4, mov…) play in the
+    system player. The file is copied to WQ Files' temporary folder first.
   - **Text and images**: text is editable, images render, plists can also be
     edited as XML text.
 - **Log**: file writes, backups, deletions, restores and errors the app handled, plus the App Group it received.
@@ -136,7 +139,14 @@ and only change what you understand.
 
 ## Install with AltStore or SideStore
 
-Add this source to get WQ Files and its updates:
+<h3 align="center">
+<a href="https://altdirect.app/?url=https://raw.githubusercontent.com/kolbicz/WQFiles/main/source.json"><img src="https://altdirect.app/assets/png/AltSource_Blue.png" width="200"></a>
+&nbsp;
+<a href="https://github.com/kolbicz/WQFiles/releases/latest/download/WQFiles.ipa"><img src="https://altdirect.app/assets/png/Download_Blue.png" width="200"></a>
+</h3>
+
+Tap **Add AltSource** on your iPhone to add the source in AltStore, SideStore,
+LiveContainer and others (via [AltDirect](https://altdirect.app)), or add it by hand:
 
 ```
 https://raw.githubusercontent.com/kolbicz/WQFiles/main/source.json
