@@ -1764,7 +1764,21 @@ static NSString *wq_scan_for_ls_store(fsid_t fsid, int64_t maxInode, qos_class_t
     return found;
 }
 
-// iOS 26: the App Data and Extensions lists from the LaunchServices database.
+// The LaunchServices database keeps containers of earlier installs that no
+// longer exist. Drop those (lstat says ENOENT even without access); keep
+// anything that exists or can't be checked.
+static NSArray<NSString *> *wq_existing_containers(NSArray<NSString *> *paths, NSUInteger *dropped)
+{
+    NSMutableArray *kept = [NSMutableArray arrayWithCapacity:paths.count];
+    struct stat st;
+    for (NSString *path in paths) {
+        if (lstat(path.fileSystemRepresentation, &st) != 0 && errno == ENOENT) { (*dropped)++; continue; }
+        [kept addObject:path];
+    }
+    return kept;
+}
+
+// The App Data and Extensions lists from the LaunchServices database.
 static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_store(NSArray<NSString *> *roots, fsid_t fsid,
                                                                                    qos_class_t qos, WQScanProgress progress)
 {
@@ -1788,9 +1802,14 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_st
             return nil;
         }
     }
+    NSUInteger stale = 0;
+    NSMutableArray *normalized = [NSMutableArray arrayWithCapacity:paths.count];
+    for (NSString *path in paths) [normalized addObject:wq_norm(path)];
+    paths = wq_existing_containers(normalized, &stale);
+    if (stale) wq_log(@"scan: %lu containers in the LaunchServices database no longer exist (earlier installs); skipped", (unsigned long)stale);
     NSMutableDictionary<NSString *, NSMutableArray *> *byRoot = [NSMutableDictionary new];
     for (NSString *root in roots) byRoot[root] = [NSMutableArray new];
-    for (NSString *path in paths) [byRoot[wq_norm(path).stringByDeletingLastPathComponent] addObject:wq_norm(path)];
+    for (NSString *path in paths) [byRoot[path.stringByDeletingLastPathComponent] addObject:path];
     if ([byRoot[roots[0]] count] < 2) return nil;
     NSMutableDictionary *result = [NSMutableDictionary new];
     for (NSString *root in roots) result[root] = [byRoot[root] sortedArrayUsingSelector:@selector(compare:)];
@@ -2037,8 +2056,11 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
             NSMutableArray *groups = [NSMutableArray new];
             for (NSString *path in all)
                 if ([wq_norm(path).stringByDeletingLastPathComponent isEqualToString:base]) [groups addObject:wq_norm(path)];
+            NSUInteger stale = 0;
+            groups = [wq_existing_containers(groups, &stale) mutableCopy];
             [groups sortUsingSelector:@selector(compare:)];
-            wq_log(@"enumerate %@: %lu group containers from the LaunchServices database", dir, (unsigned long)groups.count);
+            wq_log(@"enumerate %@: %lu group containers from the LaunchServices database%@", dir, (unsigned long)groups.count,
+                   stale ? [NSString stringWithFormat:@" (%lu no longer exist, skipped)", (unsigned long)stale] : @"");
             if (progress) progress(1, 1, groups.count);
             return groups;
         }
