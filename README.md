@@ -50,7 +50,8 @@ new files.
   Caches, tmp or data folder.
 - **Files**: browse, read and share files; each opens in the fitting tool,
   and **Open As** switches between them. Saving writes back in place (same
-  inode, owner and attributes). Create folders, import files, rename and
+  inode, owner and attributes). Create folders, import files (several at
+  once) or whole folders with everything inside, rename and
   delete (long-press, or swipe a row left or right; deleting always asks
   first). Sort by name, date modified, date created or size from the •••
   menu; long lists sorted by name get an A–Z sidebar. Long-press a folder to share it as a ZIP.

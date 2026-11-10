@@ -635,6 +635,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
     NSArray<NSString *> *_indexTitles;          // sidebar letters, when sorted by name
     NSDictionary<NSString *, NSNumber *> *_indexRows;   // letter -> first row
     BOOL _selectingFiles;
+    BOOL _importingFolder;
     NSMutableOrderedSet<NSString *> *_selectedFiles;
     UIBarButtonItem *_fileSelectItem;
     UIBarButtonItem *_fileDoneItem;
@@ -673,8 +674,10 @@ static NSString *wq_temp_work_dir(NSString *prefix)
     if (!self.readOnly && !_backupStorage) {
         [menuItems addObject:[UIAction actionWithTitle:@"New Folder" image:[UIImage systemImageNamed:@"folder.badge.plus"] identifier:nil
                           handler:^(UIAction *__unused a) { [weakSelf promptNewFolder]; }]];
-        [menuItems addObject:[UIAction actionWithTitle:@"Import File" image:[UIImage systemImageNamed:@"square.and.arrow.down"] identifier:nil
+        [menuItems addObject:[UIAction actionWithTitle:@"Import Files" image:[UIImage systemImageNamed:@"square.and.arrow.down"] identifier:nil
                           handler:^(UIAction *__unused a) { [weakSelf importFile]; }]];
+        [menuItems addObject:[UIAction actionWithTitle:@"Import Folder" image:[UIImage systemImageNamed:@"folder.badge.plus"] identifier:nil
+                          handler:^(UIAction *__unused a) { [weakSelf importFolder]; }]];
     }
     [menuItems addObject:[UIAction actionWithTitle:@"Copy Path" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil
                           handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = path; }]];
@@ -1860,16 +1863,139 @@ static NSString *wq_temp_work_dir(NSString *prefix)
 {
     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
         initForOpeningContentTypes:@[UTTypeItem] asCopy:YES];
+    picker.allowsMultipleSelection = YES;
     picker.delegate = self;
+    _importingFolder = NO;
     [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)importFolder
+{
+    // Folders can't be handed over as a copy; the picker grants temporary
+    // access to the folder itself, which is copied with everything inside.
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+        initForOpeningContentTypes:@[UTTypeFolder] asCopy:NO];
+    picker.allowsMultipleSelection = YES;
+    picker.delegate = self;
+    _importingFolder = YES;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+// A name in dir that nothing uses yet: "Name", "Name 2", … (keeps the extension).
+static NSString *wq_free_name_in(NSString *dir, NSString *name, NSMutableSet<NSString *> *claimed)
+{
+    NSString *ext = name.pathExtension, *stem = name.stringByDeletingPathExtension;
+    if (!stem.length) { stem = name; ext = @""; }
+    for (NSUInteger n = 1; n < 10000; n++) {
+        NSString *candidate = n == 1 ? name : [NSString stringWithFormat:@"%@ %lu", stem, (unsigned long)n];
+        if (n > 1 && ext.length) candidate = [candidate stringByAppendingPathExtension:ext];
+        struct stat st;
+        if ([claimed containsObject:candidate.lowercaseString] ||
+            wq_stat([dir stringByAppendingPathComponent:candidate], &st)) continue;
+        [claimed addObject:candidate.lowercaseString];
+        return candidate;
+    }
+    return nil;
+}
+
+// Shows a progress alert while work runs on the IO queue, then reports.
+- (void)runBusy:(NSString *)title failure:(NSString *)failureTitle
+           work:(BOOL (^)(NSString **error, NSString **note))work
+{
+    UIAlertController *hud = [UIAlertController alertControllerWithTitle:title message:@"Please wait…"
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:hud animated:YES completion:nil];
+    dispatch_async(wq_io(), ^{
+        NSString *error = nil, *note = nil;
+        BOOL ok = work(&error, &note);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            void (^finish)(void) = ^{
+                if (!ok) wq_alert(self, failureTitle, error ?: @"Unknown error");
+                else if (note) wq_alert(self, title, note);
+                [self reload];
+            };
+            if (self.presentedViewController == hud) [self dismissViewControllerAnimated:YES completion:finish];
+            else finish();
+        });
+    });
 }
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
 {
+    if (!urls.count) return;
+    if (_importingFolder) { [self importFolders:urls]; return; }
+    // One file: the existing flow, which offers to replace a file of the same name.
+    if (urls.count == 1) { [self importSingleFile:urls.firstObject.path]; return; }
+    // Several files: same-named ones get a free name ("Name 2.ext") instead of
+    // a question per file. The picker's local copies are removed afterwards.
+    NSString *dir = _path;
+    NSArray<NSString *> *sources = [urls valueForKey:@"path"];
+    [self runBusy:@"Importing" failure:@"Import failed" work:^BOOL(NSString **error, NSString **note) {
+        NSMutableSet<NSString *> *claimed = [NSMutableSet new];
+        NSUInteger done = 0, renamed = 0;
+        NSString *first = nil;
+        for (NSString *source in sources) {
+            NSString *name = wq_free_name_in(dir, source.lastPathComponent, claimed);
+            NSString *e = nil;
+            BOOL ok = name && wq_create_file_from([dir stringByAppendingPathComponent:name], source, &e);
+            [NSFileManager.defaultManager removeItemAtPath:source error:nil];
+            if (ok) { done++; if (![name isEqualToString:source.lastPathComponent]) renamed++; }
+            else if (!first) first = [NSString stringWithFormat:@"%@: %@", source.lastPathComponent, e ?: @"no free name"];
+        }
+        wq_log(@"import: %lu of %lu files into %@", (unsigned long)done, (unsigned long)sources.count, dir);
+        if (done < sources.count) {
+            *error = [NSString stringWithFormat:@"%lu of %lu files were imported.\n\n%@",
+                      (unsigned long)done, (unsigned long)sources.count, first];
+            return NO;
+        }
+        if (renamed) *note = [NSString stringWithFormat:@"Imported %lu files. %lu had a name that was already taken and got a number added.",
+                              (unsigned long)done, (unsigned long)renamed];
+        return YES;
+    }];
+}
+
+- (void)importFolders:(NSArray<NSURL *> *)urls
+{
+    NSString *dir = _path;
+    [self runBusy:@"Importing" failure:@"Import failed" work:^BOOL(NSString **error, NSString **note) {
+        NSMutableSet<NSString *> *claimed = [NSMutableSet new];
+        NSMutableArray<NSString *> *renamed = [NSMutableArray new];
+        for (NSURL *url in urls) {
+            BOOL scoped = [url startAccessingSecurityScopedResource];
+            NSString *name = wq_free_name_in(dir, url.lastPathComponent, claimed);
+            __block BOOL ok = NO;
+            __block NSString *e = nil;
+            if (name) {
+                NSString *dest = [dir stringByAppendingPathComponent:name];
+                // A coordinated read makes cloud folders download first.
+                NSError *coordError = nil;
+                [[NSFileCoordinator new] coordinateReadingItemAtURL:url options:0 error:&coordError byAccessor:^(NSURL *readable) {
+                    NSString *copyError = nil;
+                    ok = wq_create_dir(dest, &copyError) && wq_copy_contents(readable.path, dest, &copyError);
+                    e = copyError;
+                }];
+                if (coordError) e = e ?: coordError.localizedDescription;
+                if (!ok && e && wq_stat(dest, &(struct stat){0}))
+                    e = [NSString stringWithFormat:@"%@\n\nPart of it may already be in %@.", e, name];
+            } else {
+                e = @"No free name in this folder";
+            }
+            if (scoped) [url stopAccessingSecurityScopedResource];
+            wq_log(@"import folder: %@ -> %@/%@: %@", url.path, dir, name, ok ? @"OK" : e);
+            if (!ok) { *error = [NSString stringWithFormat:@"%@: %@", url.lastPathComponent, e ?: @"failed"]; return NO; }
+            if (![name isEqualToString:url.lastPathComponent]) [renamed addObject:name];
+        }
+        if (renamed.count)
+            *note = [NSString stringWithFormat:@"A folder with the same name already existed, so the import is named %@.",
+                     [renamed componentsJoinedByString:@", "]];
+        return YES;
+    }];
+}
+
+- (void)importSingleFile:(NSString *)source
+{
     // The picker hands over a local copy (asCopy). It is streamed into place,
     // never read into memory, and the existence check runs off the main thread.
-    NSString *source = urls.firstObject.path;
-    if (!source) return;
     NSString *dest = [_path stringByAppendingPathComponent:source.lastPathComponent];
     void (^cleanup)(void) = ^{ [NSFileManager.defaultManager removeItemAtPath:source error:nil]; };
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
