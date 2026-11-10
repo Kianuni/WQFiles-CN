@@ -566,6 +566,7 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             app.hasIdentity = hasIdentity;
             app.containerDevice = hasIdentity ? identity.st_dev : 0;
             app.containerInode = hasIdentity ? identity.st_ino : 0;
+            if (bid.length) (void)wq_app_icon(bid);   // warm the icon off the main thread
             app.name = bid.length ? (wq_display_name(bid) ?: bid)
                                   : [NSString stringWithFormat:@"Unknown container (%@)", c.lastPathComponent];
             app.bytes = 0;

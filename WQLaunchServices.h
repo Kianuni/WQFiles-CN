@@ -27,5 +27,8 @@ void wq_display_names_reset_miss(void);
 // read from storeHint (remembered when it parses) or the remembered location.
 // Never scans. Nil when there's no usable database.
 NSArray<NSString *> *_Nullable wq_ls_container_paths(NSString *_Nullable storeHint);
+// The .app bundle of an installed app, from the same database (for icons
+// where iOS won't hand them out). Nil if unknown.
+NSString *_Nullable wq_bundle_path_for_id(NSString *bundleID);
 
 NS_ASSUME_NONNULL_END

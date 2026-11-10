@@ -1878,6 +1878,21 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
     BOOL dynamicBound = maxInode <= 0;
     if (dynamicBound && [wq_shared_scan_roots() containsObject:base])
         return wq_shared_children(base, fsid, cancellation, progress);
+    // iOS 26: a full scan takes about 40 minutes; the LaunchServices database
+    // lists the group containers of installed apps.
+    if (dynamicBound && !wq_system_areas_reachable() && gContainerListProvider &&
+        [base isEqualToString:@"/private/var/mobile/Containers/Shared/AppGroup"]) {
+        NSArray<NSString *> *all = gContainerListProvider(nil);
+        if (all.count) {
+            NSMutableArray *groups = [NSMutableArray new];
+            for (NSString *path in all)
+                if ([wq_norm(path).stringByDeletingLastPathComponent isEqualToString:base]) [groups addObject:wq_norm(path)];
+            [groups sortUsingSelector:@selector(compare:)];
+            wq_log(@"enumerate %@: %lu group containers from the LaunchServices database", dir, (unsigned long)groups.count);
+            if (progress) progress(1, 1, groups.count);
+            return groups;
+        }
+    }
     int64_t probeInode = 0;
     if (dynamicBound) {
         maxInode = wq_volume_max_inode(fsid, &probeInode);

@@ -6,6 +6,7 @@
 
 #import "WQUI.h"
 #import "WQAccess.h"
+#import "WQLaunchServices.h"
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 
@@ -96,6 +97,41 @@ static UIImage *wq_real_icon(NSString *bundleID)
     unsigned long diff = 0;
     for (NSUInteger i = 0; i < fp.length; i++) diff += (unsigned long)abs((int)a[i] - (int)b[i]);
     return diff / fp.length < 8 ? nil : raw;
+}
+
+// The icon from the app's own bundle, for when iOS only hands out its
+// placeholder (iOS 26 refuses this app's icon requests). Reads the primary
+// icon name from Info.plist; asset catalogs load through UIImage.
+static UIImage *wq_bundle_icon(NSString *bundleID)
+{
+    NSString *path = wq_bundle_path_for_id(bundleID);
+    if (!path.length) return nil;
+    NSString *plistPath = [path stringByAppendingPathComponent:@"Info.plist"];
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    if (!info && wq_grant(path)) info = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    if (![info isKindOfClass:NSDictionary.class]) return nil;
+    NSBundle *bundle = [NSBundle bundleWithPath:path];
+    NSMutableArray<NSString *> *names = [NSMutableArray new];
+    for (NSString *key in @[@"CFBundleIcons", @"CFBundleIcons~ipad"]) {
+        NSDictionary *primary = [info[key] isKindOfClass:NSDictionary.class] ? info[key][@"CFBundlePrimaryIcon"] : nil;
+        if (![primary isKindOfClass:NSDictionary.class]) continue;
+        if ([primary[@"CFBundleIconName"] isKindOfClass:NSString.class]) [names addObject:primary[@"CFBundleIconName"]];
+        NSArray *files = [primary[@"CFBundleIconFiles"] isKindOfClass:NSArray.class] ? primary[@"CFBundleIconFiles"] : @[];
+        for (id file in files.reverseObjectEnumerator) if ([file isKindOfClass:NSString.class]) [names addObject:file];
+    }
+    if ([info[@"CFBundleIconFile"] isKindOfClass:NSString.class]) [names addObject:info[@"CFBundleIconFile"]];
+    [names addObjectsFromArray:@[@"AppIcon60x60", @"AppIcon"]];
+    for (NSString *name in names) {
+        UIImage *image = bundle ? [UIImage imageNamed:name inBundle:bundle compatibleWithTraitCollection:nil] : nil;
+        if (!image) {
+            for (NSString *suffix in @[@"@3x.png", @"@2x.png", @".png"]) {
+                image = [UIImage imageWithContentsOfFile:[path stringByAppendingPathComponent:[name stringByAppendingString:suffix]]];
+                if (image) break;
+            }
+        }
+        if (image.CGImage) return image;
+    }
+    return nil;
 }
 
 static UIImage *wq_round_icon(UIImage *raw)
@@ -204,12 +240,19 @@ UIImage *wq_app_icon(NSString *bundleID)
     dispatch_once(&once, ^{ cache = [NSCache new]; });
     UIImage *cached = [cache objectForKey:bundleID];
     if (cached) return cached;
-    UIImage *raw = wq_real_icon(bundleID);
+    // The bundle fallback reads files and may ask for access: never on the
+    // main thread. Lists warm the cache from their background passes; a
+    // main-thread miss gets the tile without caching it.
+    BOOL background = !NSThread.isMainThread;
+    UIImage *raw = wq_real_icon(bundleID) ?: (background ? wq_bundle_icon(bundleID) : nil);
     NSArray *parts = [bundleID componentsSeparatedByString:@"."];
     for (NSInteger n = (NSInteger)parts.count - 1; !raw && n >= 3; n--)
-        raw = wq_real_icon([[parts subarrayWithRange:NSMakeRange(0, (NSUInteger)n)] componentsJoinedByString:@"."]);
+    {
+        NSString *parent = [[parts subarrayWithRange:NSMakeRange(0, (NSUInteger)n)] componentsJoinedByString:@"."];
+        raw = wq_real_icon(parent) ?: (background ? wq_bundle_icon(parent) : nil);
+    }
     UIImage *icon = raw ? wq_round_icon(raw) : wq_service_tile(bundleID);
-    [cache setObject:icon forKey:bundleID];
+    if (raw || background) [cache setObject:icon forKey:bundleID];
     return icon;
 }
 

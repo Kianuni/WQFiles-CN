@@ -584,6 +584,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
                 WQCacheItem *item = [WQCacheItem new];
                 NSString *bid = granted ? wq_container_label(c) : nil;
                 item.bundleID = bid;
+                if (bid) (void)wq_app_icon(bid);   // warm the icon off the main thread
                 item.name = wq_display_name(bid) ?: bid ?: c.lastPathComponent;
                 item.targets = @[caches, tmp];
                 item.cacheBytes = cacheBytes;

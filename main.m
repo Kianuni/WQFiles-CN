@@ -869,6 +869,7 @@ static NSString *wq_folder_date_text(NSDate *date)
                 BOOL token = wq_grant(item.path);
                 NSString *bid = token ? wq_container_label(item.path) : nil;
                 item.bundleID = bid;
+                if (bid) (void)wq_app_icon(bid);   // warm the icon off the main thread
                 item.label = token ? (wq_display_name(bid) ?: bid ?: @"(no label)") : @"NO TOKEN";
                 if (!token && labelIssues < 3) {
                     wq_log(@"label: no token for %@", item.path);
@@ -891,6 +892,7 @@ static NSString *wq_folder_date_text(NSDate *date)
             if (!haveFullPaths && labels && item.isDir && wq_looks_like_uuid(name)) {
                 NSString *bid = wq_container_label(item.path);
                 item.bundleID = bid;
+                if (bid) (void)wq_app_icon(bid);   // warm the icon off the main thread
                 item.label = wq_display_name(bid) ?: bid;
             }
             if (!haveFullPaths && item.isDir && !item.bundleID) {
@@ -904,7 +906,7 @@ static NSString *wq_folder_date_text(NSDate *date)
                 NSString *live = wq_backup_original_path(item.path);
                 if (live && wq_looks_like_uuid(name)) {
                     NSString *bid = wq_container_label(live);
-                    if (bid) { item.bundleID = bid; item.label = wq_display_name(bid) ?: bid; }
+                    if (bid) { item.bundleID = bid; item.label = wq_display_name(bid) ?: bid; (void)wq_app_icon(bid); }
                 }
                 if ([path isEqualToString:wq_backup_root().stringByDeletingLastPathComponent]) {
                     if ([name isEqualToString:@"Backups"]) item.label = @"File Backups";
@@ -1597,7 +1599,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
 {
     if (section == 0 && !wq_system_areas_reachable())
-        return @"On iOS 26, System Data and System Groups can't be reached; worse_query covers them on iOS 27 only.";
+        return @"On iOS 26, System Data and System Groups can't be reached (worse_query covers them on iOS 27 only), and Internal Daemons can't be listed: finding them would mean scanning every file on the device.";
     return section == 1
         ? @"Overwritten and deleted files are copied to Backups first (also visible in the Files app). Long-press a backup to restore it."
         : nil;
