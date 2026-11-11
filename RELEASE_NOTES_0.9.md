@@ -46,4 +46,4 @@
 
 Sandbox technique: [worse_query](https://github.com/forcequitOS/worse_query) by Taj C (forcequit). Container enumeration: [KAMUI](https://github.com/murk-sus/kamui-escape) by murk-sus. Thanks to everyone who sent Logs and ideas. GPL-3.0-or-later.
 
-SHA-256 of WQFiles.ipa: `<filled in at release>`
+SHA-256 of WQFiles.ipa: `aa45a13993d1b9ef52caf8ad6cb84b373d4289e955c23a11c46089d452721cc7`
