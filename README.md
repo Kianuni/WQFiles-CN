@@ -80,6 +80,9 @@ new files.
 - **Log**: file writes, backups, deletions, restores and errors the app handled, plus the App Group it received.
 - **Allow Deleting** (start screen, on by default): turn it off and nothing
   can be deleted, cleared or cleaned; saving, moving and restoring still work.
+- **Show Item Counts** (start screen, off by default): folders show how many
+  items they hold. Every subfolder is listed for this, which slows down
+  folders with many subfolders.
 
 App names come from LaunchServices' own database, read from lsd's container
 (the LaunchServices API itself refuses this app on 27.x). Apple services that

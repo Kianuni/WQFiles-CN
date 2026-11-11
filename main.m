@@ -58,10 +58,24 @@ static BOOL wq_regular_file_for_ui(NSString *path)
 @property (nonatomic) uid_t uid;
 @property (nonatomic, strong) NSDate *modified;
 @property (nonatomic, strong) NSDate *created;
+@property (nonatomic) NSInteger childCount;   // folders, with Show Item Counts on; -1 unknown
 @end
 
 @implementation WQItem
+- (instancetype)init
+{
+    if ((self = [super init])) _childCount = -1;
+    return self;
+}
 @end
+
+// Settings → Show Item Counts (off by default): lists every subfolder, which
+// is slow in other apps' containers.
+static NSString *const kWQShowItemCountsPref = @"WQShowItemCounts";
+static BOOL wq_show_item_counts(void)
+{
+    return [NSUserDefaults.standardUserDefaults boolForKey:kWQShowItemCountsPref];
+}
 
 #pragma mark - File viewer
 
@@ -1524,6 +1538,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
             }
             self->_all = items;
             [self applyFilter];
+            [self countChildrenOf:items generation:generation cancellation:cancellation];
             self->_error = (names || childPaths != nil) ? nil
                 : (error.length ? error
                    : !wq_app_group() ? @"WQ Files has no App Group, so it can't open other apps' folders. Re-sign it with a tool that keeps the App Group (see Signing in the README)."
@@ -1545,6 +1560,40 @@ static NSString *wq_temp_work_dir(NSString *prefix)
             }
             [self updateToolbar];
         });
+    });
+}
+
+// Show Item Counts: list each subfolder in the background after the folder
+// appears; visible rows update as counts arrive. Container lists are left out
+// (hundreds of other apps' folders).
+- (void)countChildrenOf:(NSArray<WQItem *> *)items generation:(NSUInteger)generation
+           cancellation:(WQScanCancellation *)cancellation
+{
+    if (!wq_show_item_counts() || _labels) return;
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("wq.item-counts", DISPATCH_QUEUE_SERIAL); });
+    __weak typeof(self) weakSelf = self;
+    void (^refresh)(void) = ^{
+        WQDirViewController *strongSelf = weakSelf;
+        if (!strongSelf || generation != strongSelf->_scanGeneration || strongSelf->_error) return;
+        NSArray *visible = strongSelf.tableView.indexPathsForVisibleRows;
+        if (visible.count) [strongSelf.tableView reconfigureRowsAtIndexPaths:visible];
+    };
+    dispatch_async(queue, ^{
+        CFAbsoluteTime lastRefresh = CFAbsoluteTimeGetCurrent();
+        for (WQItem *item in items) {
+            if (cancellation.isCancelled || !weakSelf) return;
+            if (!item.isDir || item.isLink) continue;
+            NSArray *names = wq_list(item.path, NULL);
+            NSInteger count = names ? (NSInteger)names.count : -1;
+            dispatch_async(dispatch_get_main_queue(), ^{ item.childCount = count; });
+            if (CFAbsoluteTimeGetCurrent() - lastRefresh > 0.3) {
+                lastRefresh = CFAbsoluteTimeGetCurrent();
+                dispatch_async(dispatch_get_main_queue(), refresh);
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), refresh);
     });
 }
 
@@ -1576,6 +1625,8 @@ static NSString *wq_temp_work_dir(NSString *prefix)
     NSString *date = wq_folder_date_text(byCreated ? item.created : item.modified);
     if (byCreated) date = [@"created " stringByAppendingString:date];
     NSString *detail = item.isDir ? date : [NSString stringWithFormat:@"%@ · %@", wq_size_text(item.size), date];
+    if (item.isDir && item.childCount >= 0)
+        detail = [NSString stringWithFormat:@"%@ · %ld item%@", date, (long)item.childCount, item.childCount == 1 ? @"" : @"s"];
     // Container lists: the bundle id (issue #27); the folder's UUID is in its path.
     if (item.label) detail = [NSString stringWithFormat:@"%@\n%@", item.bundleID.length ? item.bundleID : item.name, detail];
     if (item.isLink) detail = [@"symlink · " stringByAppendingString:detail];
@@ -2429,7 +2480,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
     // System Groups is the extra last row, on iOS 27 only.
-    if (section == 2) return 1;
+    if (section == 2) return 2;
     return section == 0 ? (NSInteger)_locations.count + (wq_system_areas_reachable() ? 1 : 0) : 6;
 }
 
@@ -2443,8 +2494,10 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
     if (section == 0 && !wq_system_areas_reachable())
         return @"On iOS 26, System Data and System Groups can't be reached (worse_query covers them on iOS 27 only), and Internal Daemons need a scan of every file id: the first one can take most of an hour on a well-used device, later ones only check new files.";
     if (section == 2)
-        return @"When off, nothing can be deleted: no Delete or swipe to delete in folders and backups, no Clear Data in Apps "
-               "and no cleaning in the Cache Cleaner. Saving, moving and restoring still work.";
+        return @"Allow Deleting: when off, nothing can be deleted: no Delete or swipe to delete in folders and backups, "
+               "no Clear Data in Apps and no cleaning in the Cache Cleaner. Saving, moving and restoring still work.\n\n"
+               "Show Item Counts: shows how many items each folder holds. Every subfolder has to be listed for this, "
+               "which slows down folders with many subfolders, especially in other apps' data.";
     return section == 1
         ? @"Overwritten and deleted files are copied to Backups first (also visible in the Files app). Long-press a backup to restore it."
         : nil;
@@ -2458,12 +2511,15 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
     cell.accessoryView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     if (indexPath.section == 2) {
-        c.text = @"Allow Deleting";
-        c.image = [UIImage systemImageNamed:@"trash.slash"];
+        BOOL counts = indexPath.row == 1;
+        c.text = counts ? @"Show Item Counts" : @"Allow Deleting";
+        c.image = [UIImage systemImageNamed:counts ? @"number" : @"trash.slash"];
         UISwitch *toggle = [UISwitch new];
-        toggle.on = wq_deleting_allowed();
+        toggle.on = counts ? wq_show_item_counts() : wq_deleting_allowed();
         [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
-            wq_set_deleting_allowed(((UISwitch *)action.sender).isOn);
+            BOOL on = ((UISwitch *)action.sender).isOn;
+            if (counts) [NSUserDefaults.standardUserDefaults setBool:on forKey:kWQShowItemCountsPref];
+            else wq_set_deleting_allowed(on);
         }] forControlEvents:UIControlEventValueChanged];
         cell.contentConfiguration = c;
         cell.accessoryView = toggle;
