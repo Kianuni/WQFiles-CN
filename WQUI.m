@@ -290,6 +290,29 @@ dispatch_queue_t wq_io(void)
     return queue;
 }
 
+static NSString *const kWQDeletingDisabledPref = @"WQDeletingDisabled";
+
+BOOL wq_deleting_allowed(void)
+{
+    return ![NSUserDefaults.standardUserDefaults boolForKey:kWQDeletingDisabledPref];
+}
+
+void wq_set_deleting_allowed(BOOL allowed)
+{
+    [NSUserDefaults.standardUserDefaults setBool:!allowed forKey:kWQDeletingDisabledPref];
+}
+
+BOOL wq_refuse_if_deleting_off(UIViewController *host)
+{
+    if (wq_deleting_allowed()) return NO;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已关闭删除功能"
+        message:@"若要删除文件、清空应用数据或清理缓存，请先在 WQ Files 首页开启“允许删除”。"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [host presentViewController:alert animated:YES completion:nil];
+    return YES;
+}
+
 void wq_alert(UIViewController *host, NSString *title, NSString *message)
 {
     if (!host || !host.isViewLoaded || !host.view.window) return;

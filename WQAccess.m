@@ -1235,6 +1235,58 @@ BOOL wq_rename(NSString *path, NSString *newName, NSString **errorText)
     return rc == 0;
 }
 
+BOOL wq_move(NSString *path, NSString *destDir, NSString **errorText)
+{
+    NSString *source = WQCanonicalVarPath(path), *target = WQCanonicalVarPath(destDir);
+    NSString *name = source.lastPathComponent;
+    if (!WQAbsolutePathGrammar(source) || !WQAbsolutePathGrammar(target) || !name.length) {
+        if (errorText) *errorText = @"路径无效";
+        return NO;
+    }
+    NSString *sourceParent = source.stringByDeletingLastPathComponent;
+    if ([sourceParent isEqualToString:target]) {
+        if (errorText) *errorText = @"该项目已在此文件夹中";
+        return NO;
+    }
+    if ([target isEqualToString:source] || [target hasPrefix:[source stringByAppendingString:@"/"]]) {
+        if (errorText) *errorText = @"无法将文件夹移动到其自身内部";
+        return NO;
+    }
+    if (wq_is_backup_storage_path(source) || wq_is_backup_storage_path([target stringByAppendingPathComponent:name])) {
+        if (errorText) *errorText = @"无法通过文件浏览器修改受保护的备份存储目录。";
+        return NO;
+    }
+    int from = wq_open_directory_flags(sourceParent, O_SEARCH);
+    if (from < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
+    int to = wq_open_directory_flags(target, O_SEARCH);
+    if (to < 0) { if (errorText) *errorText = wq_errno(errno); close(from); return NO; }
+    const char *n = name.fileSystemRepresentation;
+    // RENAME_EXCL: never replaces an item that is already there.
+    int rc = renameatx_np(from, n, to, n, RENAME_EXCL);
+    if (rc != 0 && wq_is_denied(errno)) {
+        wq_grant(sourceParent);
+        wq_grant(target);
+        wq_grant(source);
+        rc = renameatx_np(from, n, to, n, RENAME_EXCL);
+    }
+    int err = errno;
+    if (rc == 0) { fsync(to); fsync(from); }
+    close(from);
+    close(to);
+    wq_log(@"move: %@ -> %@: %@", path, destDir, rc == 0 ? @"OK" : wq_errno(err));
+    if (rc != 0 && errorText) {
+        *errorText = err == EEXIST ? [NSString stringWithFormat:@"目标位置已存在名为“%@”的项目", name]
+                   : err == EXDEV ? @"无法将项目移动到其他存储卷"
+                   : wq_errno(err);
+    }
+    return rc == 0;
+}
+
+int wq_open_for_reading(NSString *path)
+{
+    return wq_open(path, O_RDONLY, 0);
+}
+
 // fsgetpath: resolve a filesystem object id to a path. Not in the public SDK.
 extern ssize_t fsgetpath(char *buf, size_t buflen, fsid_t *fsid, uint64_t objid);
 
@@ -1677,6 +1729,13 @@ BOOL wq_full_scan_was_declined(void)
 // (or the missing UI) declined.
 static WQScanCancellation *wq_full_scan_begin(NSString *what, int64_t ids, double seconds)
 {
+    // Without an App Group no container can be opened or named, so a long
+    // scan would only produce a list of unusable folders.
+    if (!wq_app_group()) {
+        atomic_store(&gFullScanDeclined, YES);
+        wq_log(@"scan: no App Group; full scan of %@ skipped", what);
+        return nil;
+    }
     if (!gFullScanConfirm || !gFullScanConfirm(what, ids, seconds)) {
         atomic_store(&gFullScanDeclined, YES);
         wq_log(@"scan: full scan of %@ not started (%lld ids, about %.0f s)", what, (long long)ids, seconds);
@@ -1801,7 +1860,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_st
         paths = gContainerListProvider(store);
         how = [NSString stringWithFormat:@"found by id in %.1f s", CFAbsoluteTimeGetCurrent() - started];
         if (paths.count < 2) {
-            wq_log(@"scan: the LaunchServices database at %@ lists no containers", store);
+            wq_log(@"scan: the LaunchServices database at %@ couldn't be read or lists no containers", store);
             return nil;
         }
     }
@@ -2235,8 +2294,38 @@ static BOOL wq_remove_entry(int parent, NSString *name, NSString *path, unsigned
         if (fstatat(parent, item, &current, AT_SYMLINK_NOFOLLOW) != 0 || !WQSameObject(&before, &current)) return NO;
         rc = unlinkat(parent, item, directory ? AT_REMOVEDIR : 0);
     }
+    // A user-immutable or append-only flag (on the item or its folder) makes
+    // unlink fail with EPERM even for the owner. The owner may clear those
+    // flags, so clear them and try once more. System flags stay untouched.
+    if (rc != 0 && errno == EPERM &&
+        fstatat(parent, item, &current, AT_SYMLINK_NOFOLLOW) == 0 && WQSameObject(&before, &current)) {
+        const uint32_t userLocks = UF_IMMUTABLE | UF_APPEND;
+        struct stat parentStat = {0};
+        BOOL cleared = NO;
+        if (fstat(parent, &parentStat) == 0 && (parentStat.st_flags & userLocks))
+            cleared = fchflags(parent, parentStat.st_flags & ~userLocks) == 0;
+        if ((current.st_flags & userLocks) && !S_ISLNK(current.st_mode)) {
+            int flagsFd = openat(parent, item, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC |
+                                 (directory ? O_DIRECTORY : 0));
+            struct stat opened;
+            if (flagsFd >= 0 && fstat(flagsFd, &opened) == 0 && WQSameObject(&before, &opened) &&
+                fchflags(flagsFd, opened.st_flags & ~userLocks) == 0) cleared = YES;
+            if (flagsFd >= 0) close(flagsFd);
+        }
+        if (cleared) {
+            wq_log(@"purge: cleared lock flags (item 0x%x, folder 0x%x) on %@",
+                   current.st_flags, parentStat.st_flags, path);
+            rc = unlinkat(parent, item, directory ? AT_REMOVEDIR : 0);
+        } else {
+            errno = EPERM;
+        }
+    }
     if (rc == 0 && !directory && freed) *freed += (unsigned long long)before.st_size;
-    if (rc != 0) wq_log(@"purge: %@ -> %@", path, wq_errno(errno));
+    if (rc != 0) {
+        int err = errno;
+        wq_log(@"purge: %@ -> %@ (flags 0x%x, uid %u, mode %o)", path, wq_errno(err),
+               current.st_flags, current.st_uid, current.st_mode & 07777);
+    }
     return rc == 0;
 }
 

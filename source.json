@@ -15,11 +15,20 @@
       "bundleIdentifier": "cz.kolbi.wqfiles",
       "developerName": "kolbicz（汉化：Kianuni）",
       "subtitle": "iOS 26 / 27 免越狱沙盒文件管理、应用备份与缓存清理 (worse_query)",
-      "localizedDescription": "适用于 iOS 26 与 iOS 27 的全量简体中文版文件浏览器、应用数据备份/恢复管理器与缓存清理工具，基于 worse_query 沙盒技术构建，无需越狱、无需内核漏洞。\n\n• 浏览所有已安装应用的数据容器、App Groups、扩展插件与守护进程容器（支持应用中文名与圆角图标展示）\n• 内置树形 Plist 编辑器、分页十六进制查看/编辑器与只读 SQLite 数据库查看器，所有修改自动先创建安全备份\n• 支持文件夹与应用的名称/日期/大小排序及 A–Z 快速索引侧边栏\n• 一键备份、恢复或清空应用数据，支持隔空投送导出 ZIP 备份包\n• 智能缓存与崩溃日志清理器\n\n支持 iOS 27（实测 27.0.1、27.2）及 iOS 26.0 – 26.7.2（初步支持，无法访问系统数据、系统共享组与应用图标）。签名时需保留 App Group 权限（推荐使用 AltStore / SideStore / Sideloadly）。",
+      "localizedDescription": "适用于 iOS 26 与 iOS 27 的全量简体中文版文件浏览器、应用数据备份/恢复管理器与缓存清理工具，基于 worse_query 沙盒技术构建，无需越狱、无需内核漏洞。\n\n• 浏览所有已安装应用的数据容器、App Groups、扩展插件与守护进程容器（支持应用中文名、Bundle ID 与圆角图标展示）\n• 支持多选批量移动/压缩/删除、跨应用移动文件、ZIP 压缩与解压、批量导入文件及导入整个文件夹\n• 内置 17 种语言语法高亮查看/编辑器、音视频媒体播放器、树形 Plist 编辑器、分页十六进制查看/编辑器与只读 SQLite 数据库查看器\n• 支持文件夹与应用的名称/日期/大小排序、A–Z 快速索引侧边栏及应用分类筛选\n• 一键备份、恢复或清空应用数据，支持隔空投送导出 ZIP 备份包\n• 智能缓存与崩溃日志清理器，配备首页“允许删除”防误删总开关\n\n支持 iOS 27（实测 27.0.1、27.2）及 iOS 26.0 – 26.7.2（初步支持，无法访问系统数据、系统共享组与应用图标）。签名时需保留 App Group 权限（推荐使用 AltStore / SideStore / Impactor；Sideloadly 不会添加该权限）。",
       "iconURL": "https://raw.githubusercontent.com/Kianuni/WQFiles-CN/main/icons/AppIcon1024.png",
       "tintColor": "#1E8FC7",
       "category": "utilities",
       "versions": [
+        {
+          "version": "0.9",
+          "buildVersion": "38",
+          "date": "2026-11-11",
+          "size": 360189,
+          "downloadURL": "https://github.com/Kianuni/WQFiles-CN/releases/download/v0.9/WQFiles.ipa",
+          "localizedDescription": "同步上游 v0.9 (Build 38) 并完成 100% 简体中文汉化：新增文件夹多选批量操作、跨应用移动文件与文件夹、ZIP 压缩与解压、批量导入文件与递归导入整个文件夹；内置 17 种语言代码语法高亮、音视频媒体播放器；应用管理新增“全部 / Apple / 第三方 / 已备份”分类筛选，容器列表直接显示 Bundle ID，支持从“应用备份”目录直接恢复；首页新增“允许删除”防误删开关与“显示文件夹项目数”设置；修复 iOS 26.5 应用数据库解析与锁定文件（UF_IMMUTABLE / UF_APPEND）删除问题。",
+          "minOSVersion": "26.0"
+        },
         {
           "version": "0.8",
           "buildVersion": "34",

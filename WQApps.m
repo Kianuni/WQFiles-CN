@@ -43,9 +43,23 @@
     BOOL _scanning;
     NSArray<NSString *> *_indexTitles;
     NSDictionary<NSString *, NSNumber *> *_indexRows;
+    NSString *_restoreBundleID;
+}
+
+- (instancetype)initRestoringBundleID:(NSString *)bundleID
+{
+    if ((self = [self init])) _restoreBundleID = [bundleID copy];
+    return self;
 }
 
 static NSString *const kWQAppsSortByNamePref = @"WQAppsSortByName";
+// 0 all apps, 1 Apple's, 2 everyone else's, 3 apps with a backup.
+static NSString *const kWQAppsFilterPref = @"WQAppsFilter";
+
+static BOOL wq_app_is_apple(WQAppItem *app)
+{
+    return [app.bundleID hasPrefix:@"com.apple."];
+}
 
 static NSString *wq_apps_index_letter(NSString *name)
 {
@@ -609,7 +623,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             return a.bytes > b.bytes ? NSOrderedAscending : (a.bytes < b.bytes ? NSOrderedDescending : NSOrderedSame);
         }];
         NSString *note = nil;
-        if (!containers && wq_full_scan_was_declined()) note = @"尚未列出应用：首次需要扫描全盘文件，请下拉刷新以开始扫描。";
+        if (!wq_app_group()) note = @"WQ Files 缺少 App Group 权限，无法打开其他应用的文件夹。请使用保留 App Group 权限的工具重新签名（详见 README 签名说明）。";
+        else if (!containers && wq_full_scan_was_declined()) note = @"尚未列出应用：首次需要扫描全盘文件，请下拉刷新以开始扫描。";
         else if (!containers) note = @"容器枚举失败，请前往“日志”查看 statfs/inode 原因。";
         else if (!containers.count) note = @"未找到应用容器，请下拉刷新并查看“日志”中的枚举原因。";
         else if (limited || sizeLimited) note = [NSString stringWithFormat:@"共 %lu 个容器 · 其中 %lu 个访问受限、缺少标识符或无法统计大小（详见“日志”）。",
@@ -621,6 +636,7 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             [self rebuildVisibleApps];
             [self.refreshControl endRefreshing];
             [self setBusy:NO status:note];
+            [self offerPendingRestore];
         });
     });
 }
@@ -633,6 +649,14 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
 - (void)rebuildVisibleApps
 {
     NSArray<WQAppItem *> *shown = _apps ?: @[];
+    NSInteger filter = [NSUserDefaults.standardUserDefaults integerForKey:kWQAppsFilterPref];
+    if (filter > 0) {
+        shown = [shown filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
+            if (filter == 1) return wq_app_is_apple(a);
+            if (filter == 2) return !wq_app_is_apple(a);
+            return a.backups.count > 0;
+        }]];
+    }
     if (_query.length) {
         shown = [shown filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(WQAppItem *a, NSDictionary *__unused b) {
             return [a.name localizedCaseInsensitiveContainsString:self->_query] ||
@@ -689,10 +713,23 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
         name.state = byName ? UIMenuElementStateOn : UIMenuElementStateOff;
         size.subtitle = @"从大到小";
         name.subtitle = @"A–Z";
-        completion(@[size, name]);
+        UIMenu *sort = [UIMenu menuWithTitle:@"排序方式" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[size, name]];
+        NSInteger current = [NSUserDefaults.standardUserDefaults integerForKey:kWQAppsFilterPref];
+        NSArray *titles = @[@"全部应用", @"Apple 应用", @"第三方应用", @"已备份应用"];
+        NSMutableArray *filters = [NSMutableArray new];
+        for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+            UIAction *f = [UIAction actionWithTitle:titles[(NSUInteger)i] image:nil identifier:nil handler:^(UIAction *__unused a) {
+                [NSUserDefaults.standardUserDefaults setInteger:i forKey:kWQAppsFilterPref];
+                [weakSelf resortApps];
+            }];
+            f.state = i == current ? UIMenuElementStateOn : UIMenuElementStateOff;
+            [filters addObject:f];
+        }
+        UIMenu *show = [UIMenu menuWithTitle:@"显示范围" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:filters];
+        completion(@[sort, show]);
     }];
-    return [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
-                                             menu:[UIMenu menuWithTitle:@"排序方式" children:@[items]]];
+    return [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"line.3.horizontal.decrease.circle"]
+                                             menu:[UIMenu menuWithChildren:@[items]]];
 }
 
 - (void)resortApps
@@ -700,6 +737,33 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
     [self rebuildVisibleApps];
     [self.tableView reloadData];
     [self.tableView reloadSectionIndexTitles];
+}
+
+// Long-press: copy the bundle ID or container path, open the data folder.
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
+    contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point
+{
+    if (_busy || (NSUInteger)indexPath.row >= self.visibleApps.count) return nil;
+    WQAppItem *app = self.visibleApps[(NSUInteger)indexPath.row];
+    __weak typeof(self) weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
+        actionProvider:^UIMenu *(NSArray<UIMenuElement *> *__unused suggested) {
+        NSMutableArray *actions = [NSMutableArray new];
+        if (app.bundleID.length) {
+            [actions addObject:[UIAction actionWithTitle:@"复制 Bundle ID" image:[UIImage systemImageNamed:@"tag"] identifier:nil
+                                                  handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = app.bundleID; }]];
+        }
+        [actions addObject:[UIAction actionWithTitle:@"复制容器路径" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil
+                                              handler:^(UIAction *__unused a) { UIPasteboard.generalPasteboard.string = app.container; }]];
+        if (app.hasAccess) {
+            [actions addObject:[UIAction actionWithTitle:@"打开数据文件夹" image:[UIImage systemImageNamed:@"folder"] identifier:nil
+                                                  handler:^(UIAction *__unused a) {
+                [weakSelf.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name]
+                                                         animated:YES];
+            }]];
+        }
+        return [UIMenu menuWithChildren:actions];
+    }];
 }
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController
@@ -719,7 +783,8 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
     if (_status) return _status;
     unsigned long long total = 0;
     for (WQAppItem *a in _apps) total += a.bytes;
-    if (_query.length) return [NSString stringWithFormat:@"显示 %lu / %lu 个应用", (unsigned long)self.visibleApps.count, (unsigned long)_apps.count];
+    if (_query.length || [NSUserDefaults.standardUserDefaults integerForKey:kWQAppsFilterPref] > 0)
+        return [NSString stringWithFormat:@"显示 %lu / %lu 个应用", (unsigned long)self.visibleApps.count, (unsigned long)_apps.count];
     return [NSString stringWithFormat:@"%lu 个应用 · 共 %@ 应用数据", (unsigned long)_apps.count, wq_size_text(total)];
 }
 
@@ -813,11 +878,16 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             wq_share_folder(self, latest, [NSString stringWithFormat:@"%@ %@", app.name, latest.lastPathComponent], c);
         }]];
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"清空应用数据…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
-        [self confirmClear:app];
-    }]];
+    if (wq_deleting_allowed()) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"清空应用数据…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
+            [self confirmClear:app];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"打开数据文件夹" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         [self.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name] animated:YES];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"复制 Bundle ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
+        UIPasteboard.generalPasteboard.string = app.bundleID;
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
@@ -873,6 +943,7 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
 
 - (void)confirmClear:(WQAppItem *)app
 {
+    if (wq_refuse_if_deleting_off(self)) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"清空“%@”的数据？", app.name]
         message:@"将删除该应用 Documents、Library 和 tmp 中的全部内容，效果等同于全新重装。"
                 "可选的备份仅包含 Documents 和 Library，tmp 会被直接丢弃且无法恢复。"
@@ -889,6 +960,29 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+    if (_apps && !_scanning) [self offerPendingRestore];   // the list was read before the push finished
+}
+
+- (void)offerPendingRestore
+{
+    NSString *bid = _restoreBundleID;
+    if (!bid || !self.view.window || self.presentedViewController) return;
+    _restoreBundleID = nil;
+    WQAppItem *app = nil;
+    for (WQAppItem *candidate in _apps) if ([candidate.bundleID isEqualToString:bid]) { app = candidate; break; }
+    if (!app) {
+        wq_alert(self, @"未找到应用", [NSString stringWithFormat:@"%@ 未安装，或 WQ Files 无法访问其数据目录。"
+                 "备份仅能恢复到已安装的应用中：请先安装该应用并打开一次，然后再试。", bid]);
+    } else if (!app.backups.count) {
+        wq_alert(self, @"无可用备份", [NSString stringWithFormat:@"没有找到可用于恢复 %@ 的完整备份。", app.name]);
+    } else {
+        [self pickBackupToRestore:app from:nil];
+    }
 }
 
 - (void)pickBackupToRestore:(WQAppItem *)app from:(UIView *)source
