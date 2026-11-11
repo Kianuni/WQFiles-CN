@@ -866,9 +866,11 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             wq_share_folder(self, latest, [NSString stringWithFormat:@"%@ %@", app.name, latest.lastPathComponent], c);
         }]];
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Clear Data…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
-        [self confirmClear:app];
-    }]];
+    if (wq_deleting_allowed()) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Clear Data…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *__unused a) {
+            [self confirmClear:app];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Open Data Folder" style:UIAlertActionStyleDefault handler:^(UIAlertAction *__unused a) {
         [self.navigationController pushViewController:[[WQDirViewController alloc] initWithPath:app.container title:app.name] animated:YES];
     }]];
@@ -929,6 +931,7 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
 
 - (void)confirmClear:(WQAppItem *)app
 {
+    if (wq_refuse_if_deleting_off(self)) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Clear %@?", app.name]
         message:@"Deletes everything in the app's Documents, Library and tmp, like a fresh install. "
                 "The optional backup covers Documents and Library only; tmp is discarded and cannot be restored. "

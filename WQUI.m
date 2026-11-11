@@ -288,6 +288,29 @@ dispatch_queue_t wq_io(void)
     return queue;
 }
 
+static NSString *const kWQDeletingDisabledPref = @"WQDeletingDisabled";
+
+BOOL wq_deleting_allowed(void)
+{
+    return ![NSUserDefaults.standardUserDefaults boolForKey:kWQDeletingDisabledPref];
+}
+
+void wq_set_deleting_allowed(BOOL allowed)
+{
+    [NSUserDefaults.standardUserDefaults setBool:!allowed forKey:kWQDeletingDisabledPref];
+}
+
+BOOL wq_refuse_if_deleting_off(UIViewController *host)
+{
+    if (wq_deleting_allowed()) return NO;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Deleting is turned off"
+        message:@"Turn on Allow Deleting on the start screen of WQ Files to delete, clear or clean."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [host presentViewController:alert animated:YES completion:nil];
+    return YES;
+}
+
 void wq_alert(UIViewController *host, NSString *title, NSString *message)
 {
     if (!host || !host.isViewLoaded || !host.view.window) return;

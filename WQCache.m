@@ -817,6 +817,7 @@ static BOOL WQCacheValidateItem(WQCacheItem *item, NSString **reason)
 
 - (void)confirmClean
 {
+    if (wq_refuse_if_deleting_off(self)) return;
     NSMutableArray<WQCacheItem *> *selected = [NSMutableArray new];
     unsigned long long sel = 0;
     for (WQCacheItem *item in _items) {

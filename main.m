@@ -997,6 +997,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
 
 - (void)deleteSelectedBackups
 {
+    if (wq_refuse_if_deleting_off(self)) return;
     NSArray<NSString *> *paths = [_selectedBackups.allObjects sortedArrayUsingSelector:@selector(compare:)];
     if (paths.count == 0) return;
     NSString *message = [NSString stringWithFormat:
@@ -1071,7 +1072,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
                                                                target:self action:@selector(deleteSelectedFiles)];
         del.tintColor = UIColor.systemRedColor;
         move.enabled = zip.enabled = del.enabled = any;
-        self.toolbarItems = @[move, flex, zip, flex, del];
+        self.toolbarItems = wq_deleting_allowed() ? @[move, flex, zip, flex, del] : @[move, flex, zip];
     } else if (gWQMovePaths.count) {
         UIBarButtonItem *cancel = [[UIBarButtonItem alloc] initWithTitle:@"Cancel" style:UIBarButtonItemStylePlain
                                                                   target:self action:@selector(cancelMove)];
@@ -1197,6 +1198,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
 
 - (void)deleteSelectedFiles
 {
+    if (wq_refuse_if_deleting_off(self)) return;
     NSArray<NSString *> *paths = [self selectedFilePaths];
     if (!paths.count) return;
     NSString *title = paths.count == 1 ? [NSString stringWithFormat:@"Delete “%@”?", paths.firstObject.lastPathComponent]
@@ -1574,7 +1576,8 @@ static NSString *wq_temp_work_dir(NSString *prefix)
     NSString *date = wq_folder_date_text(byCreated ? item.created : item.modified);
     if (byCreated) date = [@"created " stringByAppendingString:date];
     NSString *detail = item.isDir ? date : [NSString stringWithFormat:@"%@ · %@", wq_size_text(item.size), date];
-    if (item.label) detail = [NSString stringWithFormat:@"%@\n%@", item.name, detail];
+    // Container lists: the bundle id (issue #27); the folder's UUID is in its path.
+    if (item.label) detail = [NSString stringWithFormat:@"%@\n%@", item.bundleID.length ? item.bundleID : item.name, detail];
     if (item.isLink) detail = [@"symlink · " stringByAppendingString:detail];
     c.secondaryText = detail;
     c.secondaryTextProperties.color = UIColor.secondaryLabelColor;
@@ -1665,11 +1668,11 @@ static NSString *wq_temp_work_dir(NSString *prefix)
     [self updateBackupSelectionBar];
 }
 
-// Swipe left or right to delete, with the same rules and confirmation as the
+// Swipe left to delete, with the same rules and confirmation as the
 // long-press menu (files are backed up first; backups only as whole units).
 - (UISwipeActionsConfiguration *)deleteSwipeForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    if (_selectingBackups || _selectingFiles || _error) return nil;
+    if (_selectingBackups || _selectingFiles || _error || !wq_deleting_allowed()) return nil;
     if (indexPath.section != 0 || (NSUInteger)indexPath.row >= _items.count) return nil;
     WQItem *item = _items[(NSUInteger)indexPath.row];
     BOOL backupUnit = item.isDir && wq_backup_unit_deletable(item.path);
@@ -1705,7 +1708,8 @@ static NSString *wq_temp_work_dir(NSString *prefix)
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
     leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    return [self deleteSwipeForRowAtIndexPath:indexPath];
+    // Delete is on the left swipe only (issue #36).
+    return [UISwipeActionsConfiguration configurationWithActions:@[]];
 }
 
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView
@@ -1781,7 +1785,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
                 if (latest) UIPasteboard.generalPasteboard.string = latest.bundleID ?: latest.label;
             }]];
         }
-        if (current.isDir && wq_backup_unit_deletable(current.path)) {
+        if (current.isDir && wq_backup_unit_deletable(current.path) && wq_deleting_allowed()) {
             UIAction *remove = [UIAction actionWithTitle:@"Delete Backup…" image:[UIImage systemImageNamed:@"trash"]
                                               identifier:nil handler:^(UIAction *__unused a) {
                 WQItem *latest = currentItem();
@@ -1816,7 +1820,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
             UIAction *del = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"]
                                            identifier:nil handler:^(UIAction *__unused a) { WQItem *latest = currentItem(); if (latest) [weakSelf confirmDelete:latest]; }];
             del.attributes = UIMenuElementAttributesDestructive;
-            [actions addObject:del];
+            if (wq_deleting_allowed()) [actions addObject:del];
         }
         return [UIMenu menuWithChildren:actions];
     }];
@@ -1866,6 +1870,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
 
 - (void)confirmDeleteBackup:(WQItem *)item
 {
+    if (wq_refuse_if_deleting_off(self)) return;
     BOOL bundle = [item.path.stringByDeletingLastPathComponent isEqualToString:wq_app_backup_root()];
     NSString *message = bundle
         ? [NSString stringWithFormat:@"%@\n\nThis removes every backup for this app. It cannot be undone.", item.path]
@@ -1882,6 +1887,7 @@ static NSString *wq_temp_work_dir(NSString *prefix)
 
 - (void)confirmDelete:(WQItem *)item
 {
+    if (wq_refuse_if_deleting_off(self)) return;
     NSString *message;
     if (item.isLink) {
         message = [NSString stringWithFormat:@"%@\n\nRemoves the symbolic link only; its target is not changed.", item.path];
@@ -2418,23 +2424,27 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
     return footer;
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
     // System Groups is the extra last row, on iOS 27 only.
+    if (section == 2) return 1;
     return section == 0 ? (NSInteger)_locations.count + (wq_system_areas_reachable() ? 1 : 0) : 6;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section
 {
-    return section == 0 ? @"Containers" : @"Tools";
+    return section == 0 ? @"Containers" : section == 1 ? @"Tools" : @"Settings";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
 {
     if (section == 0 && !wq_system_areas_reachable())
         return @"On iOS 26, System Data and System Groups can't be reached (worse_query covers them on iOS 27 only), and Internal Daemons need a scan of every file id: the first one can take most of an hour on a well-used device, later ones only check new files.";
+    if (section == 2)
+        return @"When off, nothing can be deleted: no Delete or swipe to delete in folders and backups, no Clear Data in Apps "
+               "and no cleaning in the Cache Cleaner. Saving, moving and restoring still work.";
     return section == 1
         ? @"Overwritten and deleted files are copied to Backups first (also visible in the Files app). Long-press a backup to restore it."
         : nil;
@@ -2445,6 +2455,21 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"r"]
         ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"r"];
     UIListContentConfiguration *c = cell.defaultContentConfiguration;
+    cell.accessoryView = nil;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    if (indexPath.section == 2) {
+        c.text = @"Allow Deleting";
+        c.image = [UIImage systemImageNamed:@"trash.slash"];
+        UISwitch *toggle = [UISwitch new];
+        toggle.on = wq_deleting_allowed();
+        [toggle addAction:[UIAction actionWithHandler:^(UIAction *action) {
+            wq_set_deleting_allowed(((UISwitch *)action.sender).isOn);
+        }] forControlEvents:UIControlEventValueChanged];
+        cell.contentConfiguration = c;
+        cell.accessoryView = toggle;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        return cell;
+    }
     if (indexPath.section == 0) {
         if ((NSUInteger)indexPath.row < _locations.count) {
             NSArray *loc = _locations[(NSUInteger)indexPath.row];
@@ -2468,6 +2493,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 2) return;
     UIViewController *next = nil;
     if (indexPath.section == 0) {
         if ((NSUInteger)indexPath.row < _locations.count) {

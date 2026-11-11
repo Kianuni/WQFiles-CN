@@ -19,7 +19,7 @@ other apps' bundles, so apps show symbol tiles.
 ## What it opens
 
 - **App Data**: every app's data container (`Containers/Data/Application`),
-  shown with the app's name and icon instead of a UUID.
+  shown with the app's name, bundle ID and icon instead of a UUID.
 - **App Groups**: shared group containers.
 - **Extension Data** and **Internal Daemons**.
 - **System Data**: `/var/containers/Data/System` (listing only; its contents
@@ -53,7 +53,7 @@ new files.
   and **Open As** switches between them. Saving writes back in place (same
   inode, owner and attributes). Create folders, import files (several at
   once) or whole folders with everything inside, rename and
-  delete (long-press, or swipe a row left or right; deleting always asks
+  delete (long-press, or swipe a row to the left; deleting always asks
   first). Sort by name, date modified, date created or size from the •••
   menu; long lists sorted by name get an A–Z sidebar. Long-press a folder to share it as a ZIP.
   - **Select** (top right) several items to move, compress or delete them
@@ -78,6 +78,8 @@ new files.
   - **Text and images**: text is editable, images render, plists can also be
     edited as XML text.
 - **Log**: file writes, backups, deletions, restores and errors the app handled, plus the App Group it received.
+- **Allow Deleting** (start screen, on by default): turn it off and nothing
+  can be deleted, cleared or cleaned; saving, moving and restoring still work.
 
 App names come from LaunchServices' own database, read from lsd's container
 (the LaunchServices API itself refuses this app on 27.x). Apple services that
