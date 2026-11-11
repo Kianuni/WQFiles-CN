@@ -2489,7 +2489,7 @@ static NSString *const kSystemGroupRoot = @"/private/var/containers/Shared/Syste
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Signing problem: no App Group"
                 message:@"WQ Files needs an App Group to reach other apps' folders, and the tool that signed it removed it. "
                         @"Without it nothing can be opened, and app lists stay empty or show \"NO TOKEN\".\n\n"
-                        @"Re-install WQ Files with AltStore, SideStore or Sideloadly (they create the App Group), "
+                        @"Re-install WQ Files with AltStore, SideStore or Impactor (they create the App Group; Sideloadly doesn't), "
                         @"or with a provisioning profile that contains one. Wildcard certificates (as used by many "
                         @"Feather/ESign setups) can't."
                 preferredStyle:UIAlertControllerStyleAlert];

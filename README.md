@@ -169,8 +169,11 @@ your app's group container. Whatever signs the IPA must give it one. The app
 uses whichever group it receives, so the group name doesn't matter. The top
 of **Log** shows the group it got, or "No App Group" when it got none.
 
-- **AltStore, SideStore or Sideloadly with your Apple ID** (free or paid):
-  they create the App Group automatically. This is the easiest way.
+- **AltStore, SideStore or [Impactor](https://github.com/claration/impactor)
+  with your Apple ID** (free or paid): they create the App Group
+  automatically. This is the easiest way. Impactor runs on macOS, Windows and
+  Linux. **Sideloadly doesn't add the App Group**, so WQ Files signed with it
+  reports "No App Group".
 - **Feather, ESign and similar tools with a certificate (.p12) and a
   provisioning profile:** the profile has to contain an App Group. Wildcard
   profiles (App ID `*`), which most certificate sellers provide, can't contain

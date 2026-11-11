@@ -39,7 +39,8 @@
 
 ## Install
 
-The README has **Add AltSource** and **Download .ipa** buttons ([#24](https://github.com/kolbicz/WQFiles/issues/24)). The first adds the source to AltStore, SideStore, LiveContainer and others via AltDirect.
+- The README has **Add AltSource** and **Download .ipa** buttons ([#24](https://github.com/kolbicz/WQFiles/issues/24)). The first adds the source to AltStore, SideStore, LiveContainer and others via AltDirect.
+- **Sideloadly doesn't add the App Group** WQ Files needs ([#33](https://github.com/kolbicz/WQFiles/issues/33)). Use AltStore, SideStore or [Impactor](https://github.com/claration/impactor) (macOS, Windows, Linux) instead; the signing warning in the app now says so too.
 
 ## Credit
 
