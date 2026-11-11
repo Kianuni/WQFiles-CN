@@ -1,9 +1,7 @@
 name: Sync Upstream (kolbicz/WQFiles)
 
 on:
-  schedule:
-    # 每天北京时间 10:17 自动检查上游是否有更新
-    - cron: '17 2 * * *'
+  # 上游自 v0.9.1 起已官方内置简体中文，已关闭每日定时自动同步，仅保留手动触发
   workflow_dispatch:
 
 permissions:

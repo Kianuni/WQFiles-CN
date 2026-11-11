@@ -1,4 +1,27 @@
-# WQ Files（简体中文全量汉化版）
+# WQ Files（简体中文全量汉化版 · 已归档停更）
+
+> [!IMPORTANT]
+> ### 📢 停更与归档说明（官方自 `v0.9.1` 起已原生内置简体中文）
+>
+> 自上游 **[kolbicz/WQFiles v0.9.1 (Build 50)](https://github.com/kolbicz/WQFiles/releases/tag/v0.9.1)** 起，官方原版已正式内置原生 **简体中文（`zh-Hans`）** 多语言支持（默认自动跟随 iOS 系统语言，也可在首页 **“设置 → 语言 (Language)”** 中手动切换）。
+>
+> 因此，本第三方汉化仓库（`Kianuni/WQFiles-CN`）已完成阶段性历史使命，**版本定格于 `v0.9 (Build 38)` 并停止后续同步更新**，仅保留已有源码与历史发版记录供参考。
+>
+> **👉 强烈建议所有用户直接前往上游官方仓库或切换至官方软件源，以获取 `v0.9.1` 及后续更新：**
+> - **官方仓库**：[https://github.com/kolbicz/WQFiles](https://github.com/kolbicz/WQFiles)
+> - **官方 Releases 下载（原生支持中文）**：[https://github.com/kolbicz/WQFiles/releases/latest](https://github.com/kolbicz/WQFiles/releases/latest)
+> - **官方 AltStore / SideStore / LiveContainer 软件源**：
+>   ```text
+>   https://raw.githubusercontent.com/kolbicz/WQFiles/main/source.json
+>   ```
+>
+> <p align="center">
+> <a href="https://altdirect.app/?url=https://raw.githubusercontent.com/kolbicz/WQFiles/main/source.json"><img src="https://altdirect.app/assets/png/AltSource_Blue.png" width="180"></a>
+> &nbsp;
+> <a href="https://github.com/kolbicz/WQFiles/releases/latest/download/WQFiles.ipa"><img src="https://altdirect.app/assets/png/Download_Blue.png" width="180"></a>
+> </p>
+
+---
 
 **WQ Files（Worse Query Files）** 是一款专为 **iOS 26 与 iOS 27** 打造的免越狱沙盒文件浏览器、应用数据备份/恢复管理器与缓存清理工具。无需越狱、无需内核漏洞，即可直接浏览和管理第三方 App 及系统共享容器文件（实测支持 iOS 26.0 – 26.7.2、iOS 27.0 – 27.2）。
 
