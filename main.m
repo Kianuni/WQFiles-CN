@@ -25,6 +25,7 @@
 #import "WQHexViewer.h"
 #import "WQSQLiteViewer.h"
 #import "WQArchive.h"
+#import "WQSyntax.h"
 #import <AVKit/AVKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <sys/mount.h>
@@ -139,6 +140,65 @@ static NSString *wq_file_hex_dump(NSData *data, BOOL truncated)
     BOOL _truncated;
     WQEditState *_editState;
     NSDictionary<NSString *, NSNumber *> *_version;
+    NSString *_syntaxLanguage;
+    NSUInteger _syntaxGeneration;
+}
+
+static UIColor *wq_syntax_color(WQSyntaxKind kind)
+{
+    switch (kind) {
+        case WQSyntaxComment: return UIColor.systemGrayColor;
+        case WQSyntaxString: return UIColor.systemRedColor;
+        case WQSyntaxKey: return UIColor.systemTealColor;
+        case WQSyntaxKeyword: return UIColor.systemPinkColor;
+        case WQSyntaxNumber: return UIColor.systemPurpleColor;
+        case WQSyntaxTag: return UIColor.systemBlueColor;
+        case WQSyntaxAttribute: return UIColor.systemOrangeColor;
+        case WQSyntaxPreprocessor: return UIColor.systemBrownColor;
+    }
+    return UIColor.labelColor;
+}
+
+// Colors the text in the background; edits recolor after a short pause.
+- (void)highlightAfter:(NSTimeInterval)delay
+{
+    NSString *language = _syntaxLanguage;
+    if (!language) return;
+    NSUInteger generation = ++_syntaxGeneration;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        WQFileViewController *strongSelf = weakSelf;
+        if (!strongSelf || generation != strongSelf->_syntaxGeneration) return;
+        NSString *text = [strongSelf->_textView.text copy];
+        if (text.length > kWQSyntaxMaxLength) return;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSData *tokens = wq_syntax_tokens(text, language, ^BOOL {
+                WQFileViewController *s = weakSelf;
+                return !s || generation != s->_syntaxGeneration;
+            });
+            if (!tokens) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                WQFileViewController *s = weakSelf;
+                if (!s || generation != s->_syntaxGeneration) return;
+                UITextView *view = s->_textView;
+                // Not while the keyboard is composing (marked text), or if the text moved on.
+                if (view.markedTextRange) { [s highlightAfter:0.5]; return; }
+                if (![view.text isEqualToString:text]) return;
+                NSTextStorage *storage = view.textStorage;
+                NSRange all = NSMakeRange(0, storage.length);
+                [storage beginEditing];
+                [storage addAttribute:NSForegroundColorAttributeName value:UIColor.labelColor range:all];
+                const WQSyntaxToken *t = tokens.bytes;
+                for (NSUInteger i = 0; i < tokens.length / sizeof(WQSyntaxToken); i++)
+                    if (NSMaxRange(t[i].range) <= storage.length)
+                        [storage addAttribute:NSForegroundColorAttributeName value:wq_syntax_color(t[i].kind) range:t[i].range];
+                [storage endEditing];
+                NSMutableDictionary *typing = [view.typingAttributes mutableCopy];
+                typing[NSForegroundColorAttributeName] = UIColor.labelColor;
+                view.typingAttributes = typing;
+            });
+        });
+    });
 }
 
 
@@ -269,6 +329,8 @@ static NSString *wq_file_hex_dump(NSData *data, BOOL truncated)
         _kind = WQViewPlist;
         _plistFormat = display.plistFormat;
         _textView.text = display.plistText;
+        _syntaxLanguage = @"xml";
+        [self highlightAfter:0];
         if (!WQPlistFormatIsWritable(display.plistFormat)) {
             _readOnly = YES;
             NSString *prompt = self.navigationItem.prompt;
@@ -288,6 +350,8 @@ static NSString *wq_file_hex_dump(NSData *data, BOOL truncated)
     if (display.text) {
         _kind = WQViewText;
         _textView.text = display.text;
+        _syntaxLanguage = _truncated ? nil : wq_syntax_language(_path.lastPathComponent, display.text);
+        [self highlightAfter:0];
         if (!_truncated && !_readOnly) [self enableEditing];
         return;
     }
@@ -315,6 +379,7 @@ static NSString *wq_file_hex_dump(NSData *data, BOOL truncated)
 {
     if (_editState.saving) return;
     [_editState noteChange];
+    [self highlightAfter:0.4];
 }
 
 - (BOOL)blockWhileSaving
@@ -1834,6 +1899,18 @@ static NSString *wq_temp_work_dir(NSString *prefix)
                                               identifier:nil handler:^(UIAction *__unused a) {
                 WQItem *latest = currentItem();
                 if (latest) UIPasteboard.generalPasteboard.string = latest.bundleID ?: latest.label;
+            }]];
+        }
+        // App backups (AppBackups/<bundle id>[/<backup>]): restore through Apps,
+        // which knows the installed app's container.
+        NSString *backupParent = current.path.stringByDeletingLastPathComponent;
+        NSString *restoreID = [backupParent isEqualToString:wq_app_backup_root()] ? current.name
+            : [backupParent.stringByDeletingLastPathComponent isEqualToString:wq_app_backup_root()] ? backupParent.lastPathComponent : nil;
+        if (current.isDir && restoreID.length) {
+            [actions addObject:[UIAction actionWithTitle:@"Restore Backup…" image:[UIImage systemImageNamed:@"clock.arrow.circlepath"]
+                                              identifier:nil handler:^(UIAction *__unused a) {
+                [weakSelf.navigationController pushViewController:[[WQAppsViewController alloc] initRestoringBundleID:restoreID]
+                                                         animated:YES];
             }]];
         }
         if (current.isDir && wq_backup_unit_deletable(current.path) && wq_deleting_allowed()) {

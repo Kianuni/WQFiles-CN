@@ -41,7 +41,7 @@ new files.
 ## Tools
 
 - **Apps**: every app with its data size. Back up an app's **Documents and
-  Library**, restore the latest backup, clear its data (Documents, Library,
+  Library**, restore the latest backup (also from **App Backups**: long-press the app → Restore Backup), clear its data (Documents, Library,
   and tmp), open its folder, or share a backup as a ZIP over AirDrop, Files,
   Mail and so on. Show all apps, only Apple's, only others or only backed-up
   ones; long-press to copy the bundle ID or container path. `tmp` is intentionally ephemeral: clear removes it, but app
@@ -76,7 +76,10 @@ new files.
   - **Media player**: audio and video (mp3, m4a, wav, mp4, mov…) play in the
     system player. The file is copied to WQ Files' temporary folder first.
   - **Text and images**: text is editable, images render, plists can also be
-    edited as XML text.
+    edited as XML text. Code and data files get syntax colors (XML/plist,
+    JSON, YAML, INI/TOML, CSS, SQL, Markdown, C/Objective-C, Swift,
+    JavaScript/TypeScript, Java/Kotlin, Go, Rust, Python, shell, Ruby, Lua;
+    up to 1 MB).
 - **Log**: file writes, backups, deletions, restores and errors the app handled, plus the App Group it received.
 - **Allow Deleting** (start screen, on by default): turn it off and nothing
   can be deleted, cleared or cleaned; saving, moving and restoring still work.

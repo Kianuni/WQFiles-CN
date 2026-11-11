@@ -43,6 +43,13 @@
     BOOL _scanning;
     NSArray<NSString *> *_indexTitles;
     NSDictionary<NSString *, NSNumber *> *_indexRows;
+    NSString *_restoreBundleID;
+}
+
+- (instancetype)initRestoringBundleID:(NSString *)bundleID
+{
+    if ((self = [self init])) _restoreBundleID = [bundleID copy];
+    return self;
 }
 
 static NSString *const kWQAppsSortByNamePref = @"WQAppsSortByName";
@@ -625,6 +632,7 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
             [self rebuildVisibleApps];
             [self.refreshControl endRefreshing];
             [self setBusy:NO status:note];
+            [self offerPendingRestore];
         });
     });
 }
@@ -948,6 +956,29 @@ static void WQAppScanWatch(WQScanCancellation *cancellation, NSUInteger lastSeri
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+    if (_apps && !_scanning) [self offerPendingRestore];   // the list was read before the push finished
+}
+
+- (void)offerPendingRestore
+{
+    NSString *bid = _restoreBundleID;
+    if (!bid || !self.view.window || self.presentedViewController) return;
+    _restoreBundleID = nil;
+    WQAppItem *app = nil;
+    for (WQAppItem *candidate in _apps) if ([candidate.bundleID isEqualToString:bid]) { app = candidate; break; }
+    if (!app) {
+        wq_alert(self, @"App not found", [NSString stringWithFormat:@"%@ isn't installed, or WQ Files can't reach its data. "
+                 "A backup can only be restored into the installed app: install it, open it once, then try again.", bid]);
+    } else if (!app.backups.count) {
+        wq_alert(self, @"No backup", [NSString stringWithFormat:@"There is no complete backup of %@ to restore.", app.name]);
+    } else {
+        [self pickBackupToRestore:app from:nil];
+    }
 }
 
 - (void)pickBackupToRestore:(WQAppItem *)app from:(UIView *)source
